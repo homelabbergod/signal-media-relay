@@ -1,0 +1,11 @@
+{
+  "NotificationType": "{{NotificationType}}",
+  "ItemType": "{{ItemType}}",
+  "ItemId": "{{ItemId}}",
+  "Name": "{{Name}}",
+  "Year": "{{Year}}",
+  "SeriesName": "{{SeriesName}}",
+  "SeriesId": "{{SeriesId}}",
+  "SeasonNumber": "{{SeasonNumber}}",
+  "EpisodeNumber": "{{EpisodeNumber}}"
+}

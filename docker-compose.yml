@@ -1,0 +1,87 @@
+services:
+  signal-api:
+    # Feste Version statt :latest – Updates bewusst einspielen (Tag hochsetzen, docker compose pull).
+    image: bbernhard/signal-cli-rest-api:0.101
+    container_name: signal-api
+    restart: unless-stopped
+    environment:
+      MODE: "json-rpc"            # noetig fuer !request (Empfang per WebSocket)
+    volumes:
+      # Enthaelt die privaten Schluessel des Signal-Kontos – Ordner schuetzen und sichern!
+      - ./signal-cli-config:/home/.local/share/signal-cli
+    ports:
+      # Die API hat KEINE Authentifizierung: nur lokal veroeffentlichen (fuer QR-Code/Gruppen-ID).
+      # Nach der Einrichtung kann dieser Block komplett entfallen.
+      - "127.0.0.1:8080:8080"
+    # Hinweis: KEIN "no-new-privileges" – das Image startet ueber s6-overlay (setuid) und
+    # bricht damit beim Start ab (getestet mit 0.101).
+
+  relay:
+    build: .
+    image: signal-media-relay:local
+    container_name: signal-media-relay
+    restart: unless-stopped
+    depends_on:
+      - signal-api
+    # Aenderungen hier wirken erst nach "docker compose up -d" (nicht "restart").
+    # Eigene Werte nicht committen:  git update-index --skip-worktree docker-compose.yml
+    environment:
+      # --- Signal -----------------------------------------------------------
+      SIGNAL_API_URL: "http://signal-api:8080"
+      SIGNAL_NUMBER: "+491701234567"              # Nummer des Bot-Kontos
+      SIGNAL_RECIPIENT: "group.REPLACE_ME"        # Gruppen-ID (siehe README) oder Telefonnummer
+
+      # --- Webhooks ---------------------------------------------------------
+      # Geheimes Token, mind. 16 Zeichen – das Relay startet nicht mit dem Platzhalter.
+      # Erzeugen: python -c "import secrets;print(secrets.token_urlsafe(24))"
+      RELAY_TOKEN: "change-me"
+      ALLOW_INSECURE_NO_TOKEN: "false"            # nur zum Testen: Webhooks ohne Token
+      LISTEN_PORT: "8090"
+
+      # --- Ankuendigungen ---------------------------------------------------
+      AGGREGATE_SECONDS: "60"                     # Folgen einer Staffel so lange sammeln
+      DEDUPE_HOURS: "24"                          # nicht doppelt posten (0 = aus)
+      MAX_EPISODES_LISTED: "10"
+      OVERVIEW_MAX_CHARS: "350"
+      ANNOUNCE_UPGRADES: "false"                  # Qualitaets-Upgrades ankuendigen
+      ANNOUNCE_TESTS: "false"                     # "Test"-Button in die Gruppe posten
+      SEND_POSTERS: "true"
+      POSTER_ALLOWED_HOSTS: "artworks.thetvdb.com,image.tmdb.org,assets.fanart.tv"
+      LOG_LEVEL: "INFO"
+
+      # --- Jellyfin (optional) ----------------------------------------------
+      JELLYFIN_URL: ""                            # z. B. http://jellyfin:8096 – fuer Poster/Beschreibung
+      JELLYFIN_API_KEY: ""
+
+      # --- !request (optional) ----------------------------------------------
+      REQUESTS_ENABLED: "false"
+      RADARR_URL: ""                              # z. B. http://radarr:7878
+      RADARR_API_KEY: ""                          # Radarr: Settings -> General -> Security
+      RADARR_QUALITY_PROFILE: ""                  # Name oder ID, leer = erstes Profil
+      RADARR_ROOT_FOLDER: ""                      # leer = erster Root-Folder
+      RADARR_MINIMUM_AVAILABILITY: "released"     # announced, inCinemas, released
+      SONARR_URL: ""                              # z. B. http://sonarr:8989
+      SONARR_API_KEY: ""
+      SONARR_QUALITY_PROFILE: ""
+      SONARR_ROOT_FOLDER: ""
+      SONARR_MONITOR: "all"                       # all, future, missing, firstSeason, lastSeason, pilot
+      REQUEST_LIMIT_PER_DAY: "5"                  # Titel pro Person und 24 h (0 = unbegrenzt)
+      REQUEST_VIA_DM: "true"                      # Direktnachrichten von Gruppenmitgliedern annehmen
+      REQUEST_ALLOWED_SENDERS: ""                 # kommagetrennt, leer = alle Gruppenmitglieder
+      REQUEST_ADMINS: ""                          # duerfen abgelehnte Releases laden, kein Limit
+      REQUEST_COMMANDS_PER_MINUTE: "6"            # Spam-Bremse
+      RELEASES_SHOWN: "8"
+      RELEASE_SEARCH_TIMEOUT: "180"
+    ports:
+      # Laufen Sonarr/Radarr/Jellyfin im selben Docker-Netz, kann der Port-Block entfallen
+      # (Webhook-URL dann http://signal-media-relay:8090/...). Sonst ggf. auf eine LAN-IP binden,
+      # z. B. "192.168.1.10:8090:8090". Niemals ungeschuetzt ins Internet freigeben.
+      - "8090:8090"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    stop_grace_period: 30s

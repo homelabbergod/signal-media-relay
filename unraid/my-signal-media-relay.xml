@@ -1,0 +1,81 @@
+<?xml version="1.0"?>
+<!--
+  Unraid-Vorlage fuer signal-media-relay.
+  Installation: Datei nach /boot/config/plugins/dockerMan/templates-user/ kopieren,
+  dann Docker -> Add Container -> Template: "signal-media-relay".
+  Netzwerk: dasselbe eigene Docker-Netzwerk wie gluetun und signal-api (siehe README, Abschnitt Unraid).
+-->
+<Container version="2">
+  <Name>signal-media-relay</Name>
+  <Repository>homelabbergod/signal-media-relay:latest</Repository>
+  <Registry>https://hub.docker.com/r/homelabbergod/signal-media-relay</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project/>
+  <Overview>Kündigt neue Filme und Folgen aus Sonarr/Radarr (oder Jellyfin) in einer Signal-Gruppe an. Optional: Mitglieder können mit !request, !release, !releases und !grab Filme/Serien anfragen. Braucht den Container bbernhard/signal-cli-rest-api (MODE=json-rpc). Netzwerk auf das eigene Docker-Netzwerk von gluetun und signal-api stellen – Radarr/Sonarr sind dann unter http://gluetun:7878 bzw. http://gluetun:8989 erreichbar.</Overview>
+  <Category>MediaApp:Other Tools:</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams>--read-only --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=64 --memory=128m</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>bbernhard/signal-cli-rest-api mit MODE=json-rpc im selben Docker-Netzwerk.</Requires>
+
+  <!-- ===== Port ===== -->
+  <Config Name="Webhook-Port" Target="8090" Default="8090" Mode="tcp" Description="Port fuer die Webhooks von Sonarr/Radarr/Jellyfin. Im selben Docker-Netzwerk nicht noetig (http://signal-media-relay:8090). Nie ungeschuetzt ins Internet freigeben." Type="Port" Display="always" Required="false" Mask="false">8090</Config>
+
+  <!-- ===== Signal ===== -->
+  <Config Name="Signal-API URL" Target="SIGNAL_API_URL" Default="http://signal-api:8080" Mode="" Description="URL der signal-cli-rest-api. Im selben Docker-Netzwerk: http://&lt;Containername&gt;:8080" Type="Variable" Display="always" Required="true" Mask="false">http://signal-api:8080</Config>
+  <Config Name="Signal-Nummer (Bot)" Target="SIGNAL_NUMBER" Default="" Mode="" Description="Telefonnummer des Bot-Kontos, z. B. +491701234567" Type="Variable" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="Empfaenger (Gruppen-ID)" Target="SIGNAL_RECIPIENT" Default="" Mode="" Description="Gruppen-ID (beginnt mit group., siehe GET /v1/groups/&lt;nummer&gt;) oder eine Telefonnummer" Type="Variable" Display="always" Required="true" Mask="false"></Config>
+
+  <!-- ===== Webhooks ===== -->
+  <Config Name="Relay-Token" Target="RELAY_TOKEN" Default="" Mode="" Description="Geheimes Token, mind. 16 Zeichen. In Sonarr/Radarr als Webhook-Passwort, in Jellyfin als Header X-Relay-Token. Erzeugen: python -c &quot;import secrets;print(secrets.token_urlsafe(24))&quot;" Type="Variable" Display="always" Required="true" Mask="true"></Config>
+
+  <!-- ===== Ankuendigungen ===== -->
+  <Config Name="Test-Events posten" Target="ANNOUNCE_TESTS" Default="false" Mode="" Description="Test-Button in Sonarr/Radarr/Jellyfin als Nachricht in die Gruppe posten (true/false)" Type="Variable" Display="always" Required="false" Mask="false">false</Config>
+  <Config Name="Upgrades ankuendigen" Target="ANNOUNCE_UPGRADES" Default="false" Mode="" Description="Auch Qualitaets-Upgrades ankuendigen (true/false)" Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="Sammelzeit Folgen (s)" Target="AGGREGATE_SECONDS" Default="60" Mode="" Description="Folgen einer Staffel so lange sammeln und gebuendelt posten" Type="Variable" Display="advanced" Required="false" Mask="false">60</Config>
+  <Config Name="Duplikatschutz (h)" Target="DEDUPE_HOURS" Default="24" Mode="" Description="Gleichen Titel in diesem Zeitraum nicht doppelt posten (0 = aus)" Type="Variable" Display="advanced" Required="false" Mask="false">24</Config>
+  <Config Name="Max. Folgen je Nachricht" Target="MAX_EPISODES_LISTED" Default="10" Mode="" Description="So viele Folgen werden einzeln aufgelistet" Type="Variable" Display="advanced" Required="false" Mask="false">10</Config>
+  <Config Name="Max. Laenge Beschreibung" Target="OVERVIEW_MAX_CHARS" Default="350" Mode="" Description="Filmbeschreibung wird danach gekuerzt" Type="Variable" Display="advanced" Required="false" Mask="false">350</Config>
+  <Config Name="Poster senden" Target="SEND_POSTERS" Default="true" Mode="" Description="Poster als Bild anhaengen (true/false)" Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+  <Config Name="Erlaubte Poster-Hosts" Target="POSTER_ALLOWED_HOSTS" Default="artworks.thetvdb.com,image.tmdb.org,assets.fanart.tv" Mode="" Description="Poster nur von diesen Hosts laden (Schutz vor SSRF). JELLYFIN_URL ist automatisch erlaubt." Type="Variable" Display="advanced" Required="false" Mask="false">artworks.thetvdb.com,image.tmdb.org,assets.fanart.tv</Config>
+
+  <!-- ===== Jellyfin (optional) ===== -->
+  <Config Name="Jellyfin URL" Target="JELLYFIN_URL" Default="" Mode="" Description="Optional, fuer Poster/Beschreibung bei der Jellyfin-Quelle, z. B. http://jellyfin:8096" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Jellyfin API-Key" Target="JELLYFIN_API_KEY" Default="" Mode="" Description="Jellyfin: Dashboard -&gt; API-Schluessel" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+
+  <!-- ===== !request ===== -->
+  <Config Name="!request aktivieren" Target="REQUESTS_ENABLED" Default="false" Mode="" Description="Anfragen aus der Signal-Gruppe an Radarr/Sonarr erlauben (true/false)" Type="Variable" Display="always" Required="false" Mask="false">false</Config>
+  <Config Name="Radarr URL" Target="RADARR_URL" Default="" Mode="" Description="Radarr hinter gluetun: http://gluetun:7878 (Containername von gluetun). Mit URL-Base z. B. http://gluetun:7878/radarr" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Radarr API-Key" Target="RADARR_API_KEY" Default="" Mode="" Description="Radarr: Settings -&gt; General -&gt; Security" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Sonarr URL" Target="SONARR_URL" Default="" Mode="" Description="Sonarr hinter gluetun: http://gluetun:8989" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Sonarr API-Key" Target="SONARR_API_KEY" Default="" Mode="" Description="Sonarr: Settings -&gt; General -&gt; Security" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Admins" Target="REQUEST_ADMINS" Default="" Mode="" Description="Kommagetrennte Nummern/UUIDs: duerfen vom Profil abgelehnte Releases laden, kein Tageslimit" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Anfragen pro Tag" Target="REQUEST_LIMIT_PER_DAY" Default="5" Mode="" Description="Titel pro Person und 24 h (0 = unbegrenzt)" Type="Variable" Display="always" Required="false" Mask="false">5</Config>
+  <Config Name="Anfragen per Direktnachricht" Target="REQUEST_VIA_DM" Default="true" Mode="" Description="Direktnachrichten von Gruppenmitgliedern annehmen – noetig, wenn in der Gruppe nur Admins schreiben duerfen (true/false)" Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+  <Config Name="Nur diese Absender" Target="REQUEST_ALLOWED_SENDERS" Default="" Mode="" Description="Kommagetrennte Nummern/UUIDs; leer = alle Gruppenmitglieder" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Radarr Qualitaetsprofil" Target="RADARR_QUALITY_PROFILE" Default="" Mode="" Description="Name oder ID; leer = erstes Profil" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Radarr Root-Folder" Target="RADARR_ROOT_FOLDER" Default="" Mode="" Description="Pfad wie in Radarr; leer = erster Root-Folder" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Radarr Verfuegbarkeit" Target="RADARR_MINIMUM_AVAILABILITY" Default="released" Mode="" Description="Ab wann gesucht wird: announced, inCinemas, released" Type="Variable" Display="advanced" Required="false" Mask="false">released</Config>
+  <Config Name="Sonarr Qualitaetsprofil" Target="SONARR_QUALITY_PROFILE" Default="" Mode="" Description="Name oder ID; leer = erstes Profil" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Sonarr Root-Folder" Target="SONARR_ROOT_FOLDER" Default="" Mode="" Description="Pfad wie in Sonarr; leer = erster Root-Folder" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Sonarr Monitor (Fallback)" Target="SONARR_MONITOR" Default="all" Mode="" Description="Nur wenn eine Serie keine bekannten Staffeln hat: all, future, missing, firstSeason, lastSeason, pilot" Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+  <Config Name="Releases in !releases" Target="RELEASES_SHOWN" Default="8" Mode="" Description="So viele Releases zeigt !releases" Type="Variable" Display="advanced" Required="false" Mask="false">8</Config>
+  <Config Name="Indexer-Timeout (s)" Target="RELEASE_SEARCH_TIMEOUT" Default="180" Mode="" Description="So lange auf die Indexer-Suche warten" Type="Variable" Display="advanced" Required="false" Mask="false">180</Config>
+  <Config Name="Befehle pro Minute" Target="REQUEST_COMMANDS_PER_MINUTE" Default="6" Mode="" Description="Spam-Bremse pro Person" Type="Variable" Display="advanced" Required="false" Mask="false">6</Config>
+
+  <!-- ===== Technik ===== -->
+  <Config Name="Log-Level" Target="LOG_LEVEL" Default="INFO" Mode="" Description="DEBUG, INFO, WARNING, ERROR (DEBUG loggt eingehende Payloads, Token geschwaerzt)" Type="Variable" Display="advanced" Required="false" Mask="false">INFO</Config>
+  <Config Name="Listen-Port (intern)" Target="LISTEN_PORT" Default="8090" Mode="" Description="Interner Port – nur aendern, wenn auch der Container-Port oben angepasst wird" Type="Variable" Display="advanced-hide" Required="false" Mask="false">8090</Config>
+  <Config Name="Listen-Host (intern)" Target="LISTEN_HOST" Default="0.0.0.0" Mode="" Description="Interne Bind-Adresse" Type="Variable" Display="advanced-hide" Required="false" Mask="false">0.0.0.0</Config>
+  <Config Name="Ohne Token erlauben" Target="ALLOW_INSECURE_NO_TOKEN" Default="false" Mode="" Description="NUR zum Testen: Webhooks ohne Token annehmen" Type="Variable" Display="advanced-hide" Required="false" Mask="false">false</Config>
+</Container>
