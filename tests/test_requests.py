@@ -45,7 +45,7 @@ added: list[tuple[str, dict]] = []                          # what the relay add
 grabs: list[tuple[str, dict]] = []                          # releases the relay told Radarr/Sonarr to download
 library: dict[int, dict] = {7: {"kind": "radarr", "title": "Existing", "year": 2020, "tmdbId": 5,
                                 "hasFile": True, "monitored": True},
-                            8: {"kind": "radarr", "title": "Vergessen", "year": 2019, "tmdbId": 8009,
+                            8: {"kind": "radarr", "title": "Forgotten", "year": 2019, "tmdbId": 8009,
                                 "hasFile": False, "monitored": False}}
 GB = 1024 ** 3
 
@@ -70,7 +70,7 @@ def fake_releases(query: dict) -> list[dict]:
                 rel(f"{base}.720p.HDTV.x264-LOL", False, 2 * GB, "HDTV-720p",
                     reason="HDTV-720p is not wanted in profile")]
     if "episodeId" in query:
-        return [rel("Beispielserie.Ursprung.S01E02.1080p.WEB-DL-NTb", True, 3 * GB, "WEBDL-1080p")]
+        return [rel("Sample.Show.Origins.S01E02.1080p.WEB-DL-NTb", True, 3 * GB, "WEBDL-1080p")]
     series = library[int(query["seriesId"][0])]
     season = int(query["seasonNumber"][0])
     if series["title"] == "The Big Coup":
@@ -114,29 +114,29 @@ ws_connected = threading.Event()
 failures: list[str] = []
 
 RADARR_LOOKUP = {
-    "testfilm": [{"title": "Testfilm", "year": 2016, "tmdbId": 8001,
+    "test movie": [{"title": "Test Movie", "year": 2016, "tmdbId": 8001,
                  "images": [{"coverType": "poster", "remoteUrl": "http://127.0.0.1:1/blocked.jpg"}]},
-                {"title": "The Testfilm", "year": 1996, "tmdbId": 8002}],
-    "beispielfilm": [{"title": "Beispielfilm", "year": 2021, "tmdbId": 8003},
-             {"title": "Beispielfilm", "year": 1984, "tmdbId": 8004},
-             {"title": "Beispielfilm: Teil Zwei", "year": 2024, "tmdbId": 8005}],
+                {"title": "The Test Movie", "year": 1996, "tmdbId": 8002}],
+    "sample movie": [{"title": "Sample Movie", "year": 2021, "tmdbId": 8003},
+             {"title": "Sample Movie", "year": 1984, "tmdbId": 8004},
+             {"title": "Sample Movie: Part Two", "year": 2024, "tmdbId": 8005}],
     "existing": [{"title": "Existing", "year": 2020, "tmdbId": 5, "id": 7, "hasFile": True}],
     "exists": [{"title": "Exists", "year": 2019, "tmdbId": 999}],
-    "weltraumfilm": [{"title": "Weltraumfilm", "year": 2014, "tmdbId": 8006}],
-    "weltraumfilm 2014": [{"title": "Weltraumfilm", "year": 2014, "tmdbId": 8006}],
+    "space movie": [{"title": "Space Movie", "year": 2014, "tmdbId": 8006}],
+    "space movie 2014": [{"title": "Space Movie", "year": 2014, "tmdbId": 8006}],
     "unknown movie 2020": [],
-    "vergessen": [{"title": "Vergessen", "year": 2019, "tmdbId": 8009}],
-    "zukunftsfilm": [{"title": "Zukunftsfilm", "year": 2099, "tmdbId": 8011, "status": "announced",
+    "forgotten": [{"title": "Forgotten", "year": 2019, "tmdbId": 8009}],
+    "future movie": [{"title": "Future Movie", "year": 2099, "tmdbId": 8011, "status": "announced",
                       "digitalRelease": "2099-05-01T00:00:00Z"}],
     # German release names: only the umlaut spelling finds the movie, under its original title
     "grüne wiese 1985": [{"title": "Green Meadow", "year": 1985, "tmdbId": 8007}],
 }
-ORIGIN_SHOW = {"title": "Beispielserie: Ursprung", "year": 2024, "tvdbId": 9002,
+ORIGIN_SHOW = {"title": "Sample Show: Origins", "year": 2024, "tvdbId": 9002,
             "seasons": [{"seasonNumber": 0}, {"seasonNumber": 1}]}
-SAMPLE_SHOW = {"title": "Beispielserie", "year": 2022, "tvdbId": 9001,
+SAMPLE_SHOW = {"title": "Sample Show", "year": 2022, "tvdbId": 9001,
              "seasons": [{"seasonNumber": 0, "monitored": False}, {"seasonNumber": 1, "monitored": False},
                          {"seasonNumber": 2, "monitored": False}]}
-SONARR_LOOKUP = {"beispielfilm": [ORIGIN_SHOW], "beispielserie ursprung": [ORIGIN_SHOW], "beispielserie": [SAMPLE_SHOW],
+SONARR_LOOKUP = {"sample movie": [ORIGIN_SHOW], "sample show origins": [ORIGIN_SHOW], "sample show": [SAMPLE_SHOW],
                  # first hit is the wrong show -> relay must roll it back and try the next one
                  "der grosse coup": [{"title": "Coup Show", "year": 2018, "tvdbId": 9003,
                                       "seasons": [{"seasonNumber": 1}]},
@@ -144,7 +144,7 @@ SONARR_LOOKUP = {"beispielfilm": [ORIGIN_SHOW], "beispielserie ursprung": [ORIGI
                                       "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}]}]}
 deletes: list[str] = []
 # Episode statistics the fake Sonarr reports per season once a show is in the library
-SEASON_STATS = {("Beispielserie", 1): (9, 9), ("Beispielserie", 2): (0, 10)}   # (files, total)
+SEASON_STATS = {("Sample Show", 1): (9, 9), ("Sample Show", 2): (0, 10)}   # (files, total)
 puts: list[dict] = []
 commands: list[dict] = []
 
@@ -305,7 +305,7 @@ def say(text: str, *, sender: str = MEMBER, name: str = "Anna", group: str | Non
         message["groupInfo"] = {"groupId": group, "type": "DELIVER"}
     envelope = {"source": sender, "sourceNumber": sender, "sourceUuid": f"uuid-{sender}",
                 "sourceName": name, "timestamp": ts}
-    if own and edit:   # Format wie mitgeschnitten (signal-cli-rest-api 0.101): eigenes Konto, bearbeitet
+    if own and edit:   # format as captured live (signal-cli-rest-api 0.101): own account, edited
         envelope["syncMessage"] = {"sentMessage": {"destination": None, "destinationNumber": None,
                                                    "editMessage": {"targetSentTimestamp": ts - 5000,
                                                                    "dataMessage": message}}}
@@ -362,98 +362,98 @@ def main() -> int:
         check("relay connects to the Signal WebSocket", ws_connected.wait(15))
 
         say("!request")
-        r = expect_reply("So fragst du")
+        r = expect_reply("How to request")
         check("'!request' alone -> usage help, quoted", r and r.get("quote_author") == MEMBER
               and r["recipients"] == [GROUP])
 
-        say("!request Testfilm")
-        r = expect_reply("Angefragt:")
-        check("single exact match -> added directly, success reply", r and "Testfilm (2016)" in r["message"])
+        say("!request Test Movie")
+        r = expect_reply("Requested:")
+        check("single exact match -> added directly, success reply", r and "Test Movie (2016)" in r["message"])
         movie = next((b for k, b in added if k == "radarr" and b.get("tmdbId") == 8001), None)
         check("Radarr add uses configured profile, root folder, search on",
               movie and movie["qualityProfileId"] == 6 and movie["rootFolderPath"] == "/movies"
               and movie["addOptions"]["searchForMovie"] is True)
 
         say("!request NichtsDa", sender=MEMBER2, name="Chris")
-        check("no results -> 'Nichts gefunden'", expect_reply("Nichts gefunden") is not None)
+        check("no results -> 'Nothing found'", expect_reply("Nothing found") is not None)
 
         say("!request film Existing", sender=MEMBER2, name="Chris")
-        check("already downloaded -> 'schon verfügbar'", expect_reply("schon verfügbar") is not None)
+        check("already downloaded -> 'already available'", expect_reply("already available") is not None)
 
         say("!request Exists", sender=MEMBER2, name="Chris")
-        check("Radarr 'already added' error -> friendly reply", expect_reply("schon in Radarr vorhanden") is not None)
+        check("Radarr 'already added' error -> friendly reply", expect_reply("already in Radarr") is not None)
 
         say("!request serie Kaputt", sender=MEMBER2, name="Chris")
-        check("Sonarr server error -> error reported back", expect_reply("Sonarr meldet einen Fehler") is not None)
+        check("Sonarr server error -> error reported back", expect_reply("Sonarr reports an error") is not None)
 
-        say("!request Beispielfilm")
-        r = expect_reply("Treffer für")
+        say("!request Sample Movie")
+        r = expect_reply("Results for")
         check("ambiguous -> numbered list with movies and series",
-              r and "1. 🎬 Beispielfilm (2021)" in r["message"] and "📺 Beispielserie: Ursprung (2024) – 1 Staffel" in r["message"])
+              r and "1. 🎬 Sample Movie (2021)" in r["message"] and "📺 Sample Show: Origins (2024) – 1 season" in r["message"])
         say("!request 2")
-        expect_reply("Angefragt:")
-        check("'!request 2' adds the 2nd entry (Beispielfilm 1984)", any(b.get("tmdbId") == 8004 for _, b in added))
+        expect_reply("Requested:")
+        check("'!request 2' adds the 2nd entry (Sample Movie 1984)", any(b.get("tmdbId") == 8004 for _, b in added))
 
-        say("!request Weltraumfilm")
-        check("daily limit (2) reached -> refused", expect_reply("Limit 2") is not None)
+        say("!request Space Movie")
+        check("daily limit (2) reached -> refused", expect_reply("limit 2") is not None)
         check("limit: nothing added to Radarr", not any(b.get("tmdbId") == 8006 for _, b in added))
 
-        say("!request Beispielfilm", sender="+4922222222", name="Ben", group="b3RoZXItZ3JvdXA=")
+        say("!request Sample Movie", sender="+4922222222", name="Ben", group="b3RoZXItZ3JvdXA=")
         check("message from another group -> ignored", no_new_reply())
 
-        say("!request Beispielfilm", age=7200)
+        say("!request Sample Movie", age=7200)
         check("message older than 1 h -> ignored", no_new_reply())
 
         say("!request", sender=MEMBER2, group=None)
-        r = expect_reply("So fragst du")
+        r = expect_reply("How to request")
         check("DM from group member -> answered via DM", r and r["recipients"] == [MEMBER2])
 
-        say("!request Beispielfilm", sender=OUTSIDER, group=None)
+        say("!request Sample Movie", sender=OUTSIDER, group=None)
         check("DM from non-member -> ignored", no_new_reply())
 
         say("!request", sender=BOT, name="Bot-Owner", own=True)
-        check("own message from phone (sync message) -> handled", expect_reply("So fragst du") is not None)
+        check("own message from phone (sync message) -> handled", expect_reply("How to request") is not None)
 
         for _ in range(7):
             say("!hilfe", sender="+4933333333", name="Spam")
         time.sleep(3)
         spam = [m for m in sent if m.get("quote_author") == "+4933333333"]
         check("spam brake: 6 answered + 1 'slow down' notice",
-              len(spam) == 7 and sum("Zu viele Befehle" in m["message"] for m in spam) == 1)
+              len(spam) == 7 and sum("Too many commands" in m["message"] for m in spam) == 1)
 
-        # ---------------- Serien: Staffelfrage ----------------
+        # ---------------- shows: season question ----------------
         dora = dict(sender=MEMBER4, name="Dora")
-        say("!request Beispielserie", **dora)
-        r = expect_reply("welche Staffel")
+        say("!request Sample Show", **dora)
+        r = expect_reply("which season")
         check("show with several seasons -> asks: 0 = all, 1, 2 (no specials)",
-              r and "0. Alle Staffeln" in r["message"] and "1. Staffel 1" in r["message"]
-              and "2. Staffel 2" in r["message"] and "Staffel 0" not in r["message"])
+              r and "0. All seasons" in r["message"] and "1. Season 1" in r["message"]
+              and "2. Season 2" in r["message"] and "Season 0" not in r["message"])
         check("season question: nothing added yet", not any(b.get("tvdbId") == 9001 for _, b in added))
         say("!request 2", **dora)
-        r = expect_reply("Angefragt:")
+        r = expect_reply("Requested:")
         sev = next((b for k, b in added if b.get("tvdbId") == 9001), None)
         flags = {s["seasonNumber"]: s["monitored"] for s in sev["seasons"]} if sev else {}
         check("'!request 2' -> only season 2 monitored (monitor=skip), search started",
-              r and "Beispielserie (2022) – Staffel 2" in r["message"] and flags == {0: False, 1: False, 2: True}
+              r and "Sample Show (2022) – season 2" in r["message"] and flags == {0: False, 1: False, 2: True}
               and sev["addOptions"]["monitor"] == "skip" and sev["addOptions"]["searchForMissingEpisodes"] is True)
-        say("!request Beispielserie s1", **dora)
-        check("existing show, season already complete -> 'schon vollständig da'",
-              expect_reply("Staffel 1 ist schon vollständig da") is not None)
-        say("!request Beispielserie s5", **dora)
-        r = expect_reply("gibt es bei")
-        check("unknown season -> lists available seasons", r and "Verfügbar: 1, 2" in r["message"])
+        say("!request Sample Show s1", **dora)
+        check("existing show, season already complete -> 'already complete'",
+              expect_reply("season 1 is already complete") is not None)
+        say("!request Sample Show s5", **dora)
+        r = expect_reply("has no season")
+        check("unknown season -> lists available seasons", r and "Available: 1, 2" in r["message"])
 
         erik = dict(sender=MEMBER5, name="Erik")
-        say("!request Beispielserie", **erik)
-        r = expect_reply("welche Staffel")
+        say("!request Sample Show", **erik)
+        r = expect_reply("which season")
         check("existing show: season list shows ✔️ vorhanden / ⏳ angefragt",
-              r and "1. Staffel 1 (9 Folgen) ✔️ vorhanden" in r["message"]
-              and "2. Staffel 2 (10 Folgen) ⏳ angefragt" in r["message"])
+              r and "1. Season 1 (9 episodes) ✔️ available" in r["message"]
+              and "2. Season 2 (10 episodes) ⏳ requested" in r["message"])
         say("!request 0", **erik)
-        r = expect_reply("Angefragt:")
+        r = expect_reply("Requested:")
         put = puts[-1] if puts else {}
         check("'!request 0' on existing show -> all seasons monitored via PUT + SeriesSearch",
-              r and "alle Staffeln" in r["message"]
+              r and "all seasons" in r["message"]
               and {s["seasonNumber"]: s["monitored"] for s in put.get("seasons", [])} == {0: False, 1: True, 2: True}
               and commands and commands[-1]["name"] == "SeriesSearch")
         check("series added only once (no duplicate POST)",
@@ -461,63 +461,63 @@ def main() -> int:
 
         # ---------------- !releases / !grab / !release ----------------
         carla = dict(sender=MEMBER3, name="Carla")
-        say("!releases Testfilm", **carla)
-        expect_reply("Suche Releases für 🎬 Testfilm")
-        r = expect_reply("Releases für 🎬 Testfilm")
+        say("!releases Test Movie", **carla)
+        expect_reply("Searching releases for 🎬 Test Movie")
+        r = expect_reply("Releases for 🎬 Test Movie")
         check("member: !releases lists approved releases with quality/size/seeds",
-              r and "1. Testfilm.2016.2160p.UHD.BluRay.x265-TERMiNAL" in r["message"]
-              and "30.0 GB · 50 Seeds · TestIndexer" in r["message"])
+              r and "1. Test.Movie.2016.2160p.UHD.BluRay.x265-TERMiNAL" in r["message"]
+              and "30.0 GB · 50 seeds · TestIndexer" in r["message"])
         check("member: releases rejected by the profile are hidden", r and "720p" not in r["message"])
         say("!grab 9", **carla)
-        check("!grab with invalid number -> asks for valid range", expect_reply("Nummer von 1 bis 2") is not None)
+        check("!grab with invalid number -> asks for valid range", expect_reply("number from 1 to 2") is not None)
         say("!grab 1", **carla)
-        r = expect_reply("Wird geladen")
+        r = expect_reply("Downloading")
         check("!grab 1 -> grabbed via POST /release (guid + indexerId)",
-              r and any(b.get("guid") == "guid-Testfilm.2016.2160p.UHD.BluRay.x265-TERMiNAL" and b.get("indexerId") == 3
+              r and any(b.get("guid") == "guid-Test.Movie.2016.2160p.UHD.BluRay.x265-TERMiNAL" and b.get("indexerId") == 3
                         for _, b in grabs))
-        say("!release Testfilm.2016.720p.HDTV.x264-LOL", **carla)
-        r = expect_reply("nur ein Admin")
+        say("!release Test.Movie.2016.720p.HDTV.x264-LOL", **carla)
+        r = expect_reply("Only an admin")
         check("member: !release of a rejected release -> refused with reason",
               r and "not wanted in profile" in r["message"] and not any("720p" in b["guid"] for _, b in grabs))
-        say("!releases Beispielserie Ursprung", **carla)
-        r = expect_reply("Welche Staffel")
-        check("series without season -> asks which season", r and "Verfügbar: 1" in r["message"])
+        say("!releases Sample Show Origins", **carla)
+        r = expect_reply("Which season")
+        check("series without season -> asks which season", r and "Available: 1" in r["message"])
         say("!releases s1", **carla)
-        expect_reply("hinzugefügt (ohne automatische Suche)")
-        r = expect_reply("Releases für 📺 Beispielserie: Ursprung (2024)** – Staffel 1")
+        expect_reply("(without automatic search)")
+        r = expect_reply("Releases for 📺 Sample Show: Origins (2024)** – Season 1")
         origin_show = next((b for k, b in added if k == "sonarr" and b.get("tvdbId") == 9002), None)
         check("!releases on a new show -> added WITHOUT auto search, then season list",
               r and origin_show and origin_show["addOptions"]["searchForMissingEpisodes"] is False
-              and "Beispielserie.Ursprung.S01.1080p.WEB-DL-NTb" in r["message"])
+              and "Sample.Show.Origins.S01.1080p.WEB-DL-NTb" in r["message"])
 
         admin = dict(sender=ADMIN, name="Admin")
-        say("!releases Testfilm", **admin)
-        expect_reply("Suche Releases für 🎬 Testfilm")
-        r = expect_reply("Releases für 🎬 Testfilm")
+        say("!releases Test Movie", **admin)
+        expect_reply("Searching releases for 🎬 Test Movie")
+        r = expect_reply("Releases for 🎬 Test Movie")
         check("admin: sees rejected releases with reason", r and "720p.HDTV" in r["message"] and "⛔" in r["message"])
         say("!grab 3", **admin)
-        r = expect_reply("Admin-Override")
+        r = expect_reply("Admin override")
         check("admin: may grab a rejected release", r and any("720p" in b["guid"] for _, b in grabs))
-        say("!release Beispielserie.Ursprung.S01E02.1080p.WEB-DL-NTb", **admin)
-        r = expect_reply("Wird geladen:** Beispielserie.Ursprung.S01E02")
+        say("!release Sample.Show.Origins.S01E02.1080p.WEB-DL-NTb", **admin)
+        r = expect_reply("Downloading:** Sample.Show.Origins.S01E02")
         check("!release with a single-episode name -> episode search + grab",
-              r and any(b["guid"] == "guid-Beispielserie.Ursprung.S01E02.1080p.WEB-DL-NTb" for _, b in grabs))
+              r and any(b["guid"] == "guid-Sample.Show.Origins.S01E02.1080p.WEB-DL-NTb" for _, b in grabs))
         say("!release Unknown.Movie.2020.1080p.WEB-DL-XYZ", **admin)
-        r = expect_reply("finde ich in Radarr")
+        r = expect_reply("can't find a movie/show")
         check("!release of an unknown title -> says nothing found (no '!request first' detour)",
               r and "!request" not in r["message"])
-        say("!release Testfilm.2016.2160p.FAKE-NOPE", **admin)
-        check("!release not offered by indexers -> told so", expect_reply("haben die Indexer nicht") is not None)
-        say("!release Weltraumfilm.2014.1080p.BluRay.x264-SPARKS", **admin)
-        r = expect_reply("Wird geladen:** Weltraumfilm")
+        say("!release Test.Movie.2016.2160p.FAKE-NOPE", **admin)
+        check("!release not offered by indexers -> told so", expect_reply("The indexers don't have") is not None)
+        say("!release Space.Movie.2014.1080p.BluRay.x264-SPARKS", **admin)
+        r = expect_reply("Downloading:** Space.Movie")
         inter = next((b for k, b in added if b.get("tmdbId") == 8006), None)
         check("!release of a title not in the library -> added without auto search, then grabbed",
               r and inter and inter["addOptions"]["searchForMovie"] is False)
 
-        # ---------------- !release mit deutschen Release-Namen ----------------
+        # ---------------- !release with German release names ----------------
         erik = dict(sender=MEMBER5, name="Erik")
         say("!release Gruene.Wiese.1985.German.1080p.BluRay.x264-GRP", **erik)
-        r = expect_reply("Wird geladen", timeout=20)
+        r = expect_reply("Downloading", timeout=20)
         bttf = next((b for _, b in added if b.get("tmdbId") == 8007), None)
         check("German release name (ue -> ü) -> found 'Green Meadow', added w/o search, grabbed",
               r and bttf and bttf["addOptions"]["searchForMovie"] is False
@@ -525,7 +525,7 @@ def main() -> int:
 
         fynn = dict(sender=MEMBER6, name="Fynn")
         say("!release Der.Grosse.Coup.S01.German.DL.1080p.WEB.x264-NTb", **fynn)
-        r = expect_reply("Wird geladen", timeout=30)
+        r = expect_reply("Downloading", timeout=30)
         wrong_show = [b for _, b in added if b.get("tvdbId") == 9003]
         check("wrong first match (Coup Show) is rolled back, right show (The Big Coup) grabbed",
               r and wrong_show and any("/series/" in d for d in deletes)
@@ -534,43 +534,43 @@ def main() -> int:
               and any(b["guid"] == "guid-Der.Grosse.Coup.S01.German.DL.1080p.WEB.x264-NTb" for _, b in grabs))
         check("rollback never deletes files", all("deleteFiles=false" in d for d in deletes))
 
-        # ---------------- Randfaelle (0.8.0) ----------------
+        # ---------------- edge cases (0.8.0) ----------------
         g = dict(sender=MEMBER7, name="Gina")
-        say("!request Vergessen", **g)
-        r = expect_reply("Angefragt:")
-        check("existing but UNmonitored movie -> monitored again + MoviesSearch (was: 'wird gesucht')",
-              r and "wieder aktiv" in r["message"] and library[8]["monitored"] is True
+        say("!request Forgotten", **g)
+        r = expect_reply("Requested:")
+        check("existing but UNmonitored movie -> monitored again + MoviesSearch (was: 'being searched')",
+              r and "active again" in r["message"] and library[8]["monitored"] is True
               and any(c.get("name") == "MoviesSearch" and c.get("movieIds") == [8] for c in commands))
-        say("!request Zukunftsfilm", **g)
-        r = expect_reply("Angefragt:")
-        check("not yet released movie -> tells expected date", r and "voraussichtlich ab 01.05.2099" in r["message"])
+        say("!request Future Movie", **g)
+        r = expect_reply("Requested:")
+        check("not yet released movie -> tells expected date", r and "expected from 2099-05-01" in r["message"])
         say("!request", edit=True, **g)
-        r = expect_reply("So fragst du")
+        r = expect_reply("How to request")
         check("edited message (typo fixed) is processed, quoting the ORIGINAL message",
               r is not None and r.get("quote_timestamp") == r_ts_hint() - 5000)
         say("!request", sender=BOT, name="Bot-Owner", own=True, edit=True)
-        r = expect_reply("So fragst du")
+        r = expect_reply("How to request")
         check("OWN edited message (syncMessage.sentMessage.editMessage, as captured live) is processed",
               r is not None and r.get("quote_timestamp") == r_ts_hint() - 5000)
         say("\ufffc !request", **g)
-        check("command after an @mention is recognised", expect_reply("So fragst du") is not None)
+        check("command after an @mention is recognised", expect_reply("How to request") is not None)
 
         h = dict(sender=MEMBER8, name="Hans")
-        say("!request Beispielfilm", **h)
-        r = expect_reply("Treffer für")
+        say("!request Sample Movie", **h)
+        r = expect_reply("Results for")
         say("2", quote={"id": 1, "authorNumber": BOT, "text": r["message"] if r else ""}, **h)
         check("bare number as quote-reply to the bot's list works like '!request 2'",
-              expect_reply("Beispielfilm (1984)") is not None)
+              expect_reply("Sample Movie (1984)") is not None)
         say("2", **h)
         check("bare number WITHOUT quote is ignored", no_new_reply(1.5))
         say("!id", **h)
-        r = expect_reply("privat geschickt")
-        dm = expect_reply("Deine Signal-IDs")
+        r = expect_reply("privately")
+        dm = expect_reply("Your Signal IDs")
         check("!id -> short note in group, IDs sent privately",
               r and dm and dm["recipients"] == [MEMBER8] and f"UUID: uuid-{MEMBER8}" in dm["message"])
-        say("!request Beispielserie 2022", **h)
+        say("!request Sample Show 2022", **h)
         check("show with year in query (Sonarr finds it only without year) -> season question",
-              expect_reply("welche Staffel") is not None)
+              expect_reply("which season") is not None)
 
         for _ in range(8):
             say("!request Spam", sender=OUTSIDER, group=None)
@@ -578,24 +578,24 @@ def main() -> int:
               no_new_reply(2) and not any(m["recipients"] == [OUTSIDER] for m in sent))
 
         i = dict(sender=MEMBER9, name="Ida")
-        say("!release `Testfilm.2016.1080p.BluRay.x264-SPARKS.mkv`", **i)
-        r = expect_reply("Wird geladen", timeout=20)
+        say("!release `Test.Movie.2016.1080p.BluRay.x264-SPARKS.mkv`", **i)
+        r = expect_reply("Downloading", timeout=20)
         check("pasted release name with backticks and .mkv -> cleaned and grabbed",
-              r and "Testfilm.2016.1080p.BluRay.x264-SPARKS" in r["message"])
-        say("!release Testfilm.2016.1080p.BluRey.x264-SPARKS", **i)
-        r = expect_reply("gibt es so nicht", timeout=20)
+              r and "Test.Movie.2016.1080p.BluRay.x264-SPARKS" in r["message"])
+        say("!release Test.Movie.2016.1080p.BluRey.x264-SPARKS", **i)
+        r = expect_reply("doesn't exist like that", timeout=20)
         check("release name with a typo -> list of similar releases to !grab",
-              r and "1. Testfilm.2016.1080p.BluRay.x264-SPARKS" in r["message"] and "!grab" in r["message"])
+              r and "1. Test.Movie.2016.1080p.BluRay.x264-SPARKS" in r["message"] and "!grab" in r["message"])
 
-        # Testfilm arrives -> announcement names the requester
+        # Test Movie arrives -> announcement names the requester
         req = urllib.request.Request(
             f"http://127.0.0.1:{relay_port}/radarr", method="POST",
-            data=json.dumps({"eventType": "Download", "movie": {"title": "Testfilm", "year": 2016,
+            data=json.dumps({"eventType": "Download", "movie": {"title": "Test Movie", "year": 2016,
                                                                  "tmdbId": 8001}}).encode(),
             headers={"Content-Type": "application/json", "X-Relay-Token": TOKEN})
         urllib.request.urlopen(req, timeout=10).read()
-        r = expect_reply("Neuer Film:** Testfilm")
-        check("announcement says who requested it", r and "Angefragt von Anna" in r["message"])
+        r = expect_reply("New movie:** Test Movie")
+        check("announcement says who requested it", r and "Requested by Anna" in r["message"])
     finally:
         chat_in.put(None)
         relay.terminate()

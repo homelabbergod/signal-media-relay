@@ -3,31 +3,31 @@
 Signal Media Relay
 ==================
 
-Empfaengt Webhooks von Sonarr, Radarr und/oder Jellyfin und kuendigt neue
-Filme/Folgen in einer Signal-Gruppe (oder an eine Nummer) an. Der Versand
-laeuft ueber die signal-cli-rest-api (bbernhard/signal-cli-rest-api).
+Receives webhooks from Sonarr, Radarr and/or Jellyfin and announces new movies
+and episodes in a Signal group (or to a phone number). Messages are sent through
+signal-cli-rest-api (bbernhard/signal-cli-rest-api).
 
-Endpunkte (POST, JSON):
+Endpoints (POST, JSON or form data):
     /sonarr    Sonarr  -> Settings > Connect > Webhook
     /radarr    Radarr  -> Settings > Connect > Webhook
-    /jellyfin  Jellyfin Webhook-Plugin (Generic Destination, Template siehe README)
-    /health    GET, Statuspruefung
+    /jellyfin  Jellyfin Webhook plugin ("Generic" or "Generic Form", template see README)
+    /health    GET, status check
 
-Auth (eine der Varianten):
-    - Basic Auth, Passwort = RELAY_TOKEN (Sonarr/Radarr: Felder Username/Password)
-    - Header "X-Relay-Token: <RELAY_TOKEN>" (Jellyfin: Header im Webhook-Plugin)
-    - ?token=<RELAY_TOKEN> in der URL (Fallback, landet ggf. in fremden Logs)
+Auth (any one of):
+    - Basic Auth, password = RELAY_TOKEN (Sonarr/Radarr: username/password fields)
+    - Header "X-Relay-Token: <RELAY_TOKEN>" (Jellyfin: header in the webhook plugin)
+    - ?token=<RELAY_TOKEN> in the URL (fallback, may end up in other people's logs)
 
-Optional (REQUESTS_ENABLED=true): liest ueber den WebSocket der signal-cli-rest-api
-mit und verarbeitet "!request <Titel>" aus der Gruppe (oder per Direktnachricht von
-Gruppenmitgliedern) – sucht in Radarr/Sonarr, fuegt den Titel hinzu und antwortet.
+Optional (REQUESTS_ENABLED=true): listens on the signal-cli-rest-api WebSocket and
+handles "!request <title>" from the group (or via direct message from group members):
+searches Radarr/Sonarr, adds the title and replies. Bot language: BOT_LANGUAGE=en|de.
 
-Nur Python-Standardbibliothek, keine Abhaengigkeiten.
+Python standard library only, no dependencies.
 """
 
 from __future__ import annotations
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 import base64
 import binascii
@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # --------------------------------------------------------------------------- #
-# Konfiguration
+# Configuration
 # --------------------------------------------------------------------------- #
 
 
@@ -76,7 +76,7 @@ def _env_int(name: str, default: int) -> int:
     try:
         return int(value) if value is not None else default
     except ValueError:
-        sys.exit(f"Konfigurationsfehler: {name} muss eine Zahl sein (ist: {value!r})")
+        sys.exit(f"Configuration error: {name} must be a number (is: {value!r})")
 
 
 SIGNAL_API_URL = (_env("SIGNAL_API_URL", "http://signal-api:8080") or "").rstrip("/")
@@ -85,6 +85,7 @@ SIGNAL_RECIPIENT = _env("SIGNAL_RECIPIENT")
 RELAY_TOKEN = _env("RELAY_TOKEN", "")
 LISTEN_HOST = _env("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = _env_int("LISTEN_PORT", 8090)
+BOT_LANGUAGE = (_env("BOT_LANGUAGE", "en") or "en").lower()
 AGGREGATE_SECONDS = _env_int("AGGREGATE_SECONDS", 60)
 DEDUPE_HOURS = _env_int("DEDUPE_HOURS", 24)
 MAX_EPISODES_LISTED = _env_int("MAX_EPISODES_LISTED", 10)
@@ -96,7 +97,7 @@ JELLYFIN_URL = (_env("JELLYFIN_URL", "") or "").rstrip("/")
 JELLYFIN_API_KEY = _env("JELLYFIN_API_KEY", "")
 LOG_LEVEL = (_env("LOG_LEVEL", "INFO") or "INFO").upper()
 ALLOW_INSECURE_NO_TOKEN = _env_bool("ALLOW_INSECURE_NO_TOKEN", False)
-# Nur von diesen Hosts (inkl. Subdomains) werden Poster geladen; JELLYFIN_URL wird automatisch ergaenzt.
+# Posters are only downloaded from these hosts (incl. subdomains); JELLYFIN_URL is added automatically.
 POSTER_ALLOWED_HOSTS = {
     h.strip().lower().lstrip(".")
     for h in (_env("POSTER_ALLOWED_HOSTS", "artworks.thetvdb.com,image.tmdb.org,assets.fanart.tv") or "").split(",")
@@ -113,31 +114,31 @@ MAX_FIELD_CHARS = 300
 MAX_OUTBOX = 500
 REQUEST_TIMEOUT_SECONDS = 15
 
-# --- !request-Feature (Anfragen aus der Signal-Gruppe an Radarr/Sonarr) ----
+# --- !request feature (requests from the Signal group to Radarr/Sonarr) -------
 REQUESTS_ENABLED = _env_bool("REQUESTS_ENABLED", False)
 RADARR_URL = (_env("RADARR_URL", "") or "").rstrip("/")
 RADARR_API_KEY = _env("RADARR_API_KEY", "")
-RADARR_QUALITY_PROFILE = _env("RADARR_QUALITY_PROFILE", "")      # Name oder ID, leer = erstes Profil
-RADARR_ROOT_FOLDER = _env("RADARR_ROOT_FOLDER", "")              # Pfad, leer = erster Root-Folder
+RADARR_QUALITY_PROFILE = _env("RADARR_QUALITY_PROFILE", "")      # name or ID, empty = first profile
+RADARR_ROOT_FOLDER = _env("RADARR_ROOT_FOLDER", "")              # path, empty = first root folder
 RADARR_MINIMUM_AVAILABILITY = _env("RADARR_MINIMUM_AVAILABILITY", "released")
 SONARR_URL = (_env("SONARR_URL", "") or "").rstrip("/")
 SONARR_API_KEY = _env("SONARR_API_KEY", "")
 SONARR_QUALITY_PROFILE = _env("SONARR_QUALITY_PROFILE", "")
 SONARR_ROOT_FOLDER = _env("SONARR_ROOT_FOLDER", "")
 SONARR_MONITOR = _env("SONARR_MONITOR", "all")                   # all, future, missing, firstSeason, ...
-REQUEST_LIMIT_PER_DAY = _env_int("REQUEST_LIMIT_PER_DAY", 5)     # erfolgreiche Anfragen pro Person / 24 h, 0 = unbegrenzt
-REQUEST_VIA_DM = _env_bool("REQUEST_VIA_DM", True)               # Direktnachrichten von Gruppenmitgliedern annehmen
-REQUEST_ALLOWED_SENDERS = {                                       # leer = alle Gruppenmitglieder
+REQUEST_LIMIT_PER_DAY = _env_int("REQUEST_LIMIT_PER_DAY", 5)     # titles per person / 24 h, 0 = unlimited
+REQUEST_VIA_DM = _env_bool("REQUEST_VIA_DM", True)               # accept direct messages from group members
+REQUEST_ALLOWED_SENDERS = {                                       # empty = all group members
     s.strip() for s in (_env("REQUEST_ALLOWED_SENDERS", "") or "").split(",") if s.strip()
 }
-REQUEST_ADMINS = {                                                # duerfen auch vom Profil abgelehnte Releases holen, kein Limit
+REQUEST_ADMINS = {                                                # may grab releases the profile rejects, no limit
     s.strip() for s in (_env("REQUEST_ADMINS", "") or "").split(",") if s.strip()
 }
-RELEASES_SHOWN = _env_int("RELEASES_SHOWN", 8)                    # so viele Releases zeigt !releases
-RELEASE_SEARCH_TIMEOUT = _env_int("RELEASE_SEARCH_TIMEOUT", 180)  # Sekunden fuer die Indexer-Suche
-REQUEST_MAX_AGE_SECONDS = 3600      # aeltere (z. B. nachgelieferte) Befehle ignorieren
-SELECTION_TTL_SECONDS = 600         # so lange gilt eine Trefferliste fuer "!request <Nr>"
-COMMANDS_PER_MINUTE = _env_int("REQUEST_COMMANDS_PER_MINUTE", 6)   # Spam-Bremse pro Person
+RELEASES_SHOWN = _env_int("RELEASES_SHOWN", 8)                    # how many releases !releases shows
+RELEASE_SEARCH_TIMEOUT = _env_int("RELEASE_SEARCH_TIMEOUT", 180)  # seconds for the indexer search
+REQUEST_MAX_AGE_SECONDS = 3600      # ignore older commands (e.g. delivered late after downtime)
+SELECTION_TTL_SECONDS = 600         # how long a result list is valid for "!request <no.>"
+COMMANDS_PER_MINUTE = _env_int("REQUEST_COMMANDS_PER_MINUTE", 6)   # spam brake per person
 MAX_WS_MESSAGE_BYTES = 4 * 1024 * 1024
 MAX_ARR_RESPONSE_BYTES = 16 * 1024 * 1024
 
@@ -149,7 +150,267 @@ log = logging.getLogger("relay")
 
 
 # --------------------------------------------------------------------------- #
-# Datenmodelle
+# Bot texts (BOT_LANGUAGE=en|de)
+# --------------------------------------------------------------------------- #
+
+MESSAGES: dict[str, dict[str, str]] = {
+    "en": {
+        # announcements
+        "new_movie": "🎬 **New movie:** {title}",
+        "quality": "Quality: {quality}",
+        "requested_by": "🙋 Requested by {name}",
+        "new_episode": "New episode",
+        "new_episodes": "{count} new episodes",
+        "season": "Season {n}",
+        "specials": "Specials",
+        "more_episodes": "… and {count} more",
+        "test_ok": "✅ Connection test from {source} successful.",
+        "unknown_movie": "Unknown movie",
+        "unknown_series": "Unknown show",
+        # help / general
+        "usage": ("ℹ️ **How to request something:**\n"
+                  "!request <title> – movie or show; downloaded according to the quality profile\n"
+                  "For shows the bot asks which season (0 = all) – or directly: “!request Example Show s2”\n"
+                  "!request movie <title> / !request show <title> – movies only / shows only\n"
+                  "Tip: add the year, e.g. “!request Example Movie 2021”\n"
+                  "\n"
+                  "**Pick a specific release:**\n"
+                  "!releases <title> – indexer release list (shows: “!releases <title> s2”)\n"
+                  "!releases – list for the title you picked last\n"
+                  "!grab <no.> – download a release from the list\n"
+                  "!release <release name> – download exactly this release\n"
+                  "\n"
+                  "Tip: you can also reply to a bot list with just the number (as a quote).\n"
+                  "!id – sends you your Signal ID privately (for admin settings)"),
+        "someone": "someone",
+        "here": "here",
+        "in_group": "in the group",
+        "slow_down": "🐢 Too many commands at once – please wait a minute.",
+        "internal_error": "⚠️ Something went wrong internally – please try again later.",
+        "not_allowed": "⛔ You are not allowed to make requests.",
+        "id_header": "🆔 **Your Signal IDs** (for REQUEST_ADMINS / REQUEST_ALLOWED_SENDERS):",
+        "id_number": "Number: {value}",
+        "id_uuid": "UUID: {value}",
+        "id_sent": "📬 I sent you your ID privately.",
+        # searching titles
+        "list_expired": "⌛ Your result list has expired – please search again.",
+        "title_missing": "❓ Please give a title, e.g. “{action} Example Movie”.",
+        "movies": "Movies",
+        "shows": "Shows",
+        "cannot_request": "⚠️ {kind} can't be requested here.",
+        "cannot_request_media": "⚠️ Movies/shows can't be requested here.",
+        "nothing_found": "🔍 Nothing found for “{query}”.",
+        "tip_release": "Tip: for a release name use “!release {query}”.",
+        "results": "🔍 **Results for “{query}”:**",
+        "already_there": " – already there",
+        "reply_with": "Reply with “{action} <no.>{hint}” (valid for {minutes} min)",
+        "limit": "⛔ You already requested {count} titles in the last 24 hours (limit {limit}). Please try again later.",
+        "seasons_count_1": "1 season",
+        "seasons_count": "{count} seasons",
+        # shows / seasons
+        "which_season_q": "📺 **{label}** – which season?",
+        "all_seasons_item": "0. All seasons",
+        "season_item": "{n}. Season {n}",
+        "episodes_count": " ({count} episodes)",
+        "season_available": " ✔️ available",
+        "season_requested": " ⏳ requested",
+        "season_list_expired": "⌛ The season choice has expired – please send “!request <title>” again.",
+        "what_all": "all seasons",
+        "what_one": "season {n}",
+        "what_many": "seasons {numbers}",
+        "season_complete": "{label} – {what} is already complete 🍿",
+        "already_in_arr": "{label} is already in {arr} 📚",
+        "series_requested": ("✅ **Requested:** {label} – {what}\n"
+                             "Sonarr is now searching according to the quality profile – "
+                             "new episodes will be announced {where}.{upcoming}"),
+        "upcoming": "\n📅 The show hasn't started yet – episodes will be downloaded as they air.",
+        "no_such_season": "❓ {label} has no season {season}. Available: {known}.",
+        "none": "none",
+        # movies
+        "movie_available": "{label} is already available 🍿",
+        "movie_searching": "{label} has already been requested and is being searched ⏳{hint}",
+        "movie_remonitored": ("✅ **Requested:** {label}\nWas in Radarr but not being searched – active again now. "
+                              "It will be announced {where} once it's there.{hint}"),
+        "movie_requested": ("✅ **Requested:** {label}\n{arr} is searching for it now – it will be announced {where} "
+                            "once it's there.{hint}\nWant a specific release? → “!releases”"),
+        "release_hint": "\n📅 Not out for download yet{when} – it will be downloaded automatically once available.",
+        "release_hint_when": " (expected from {date})",
+        # releases
+        "added_no_search": "➕ {label} was added to {arr} (without automatic search).",
+        "which_title": "❓ Which title? E.g. “!releases Example Movie 2021” or “!releases Example Show s2”.",
+        "which_season": "❓ Which season of {label}? E.g. “!releases s1”.{known}",
+        "available_seasons": " Available: {numbers}.",
+        "searching_releases": "🔎 Searching releases for {what} at the indexers … (may take up to a minute)",
+        "season_suffix": " – Season {n}",
+        "not_found_in_arr": "⚠️ {label} can't be found in {arr}.",
+        "no_releases": "📭 No matching releases found for {label}{extra}.",
+        "no_releases_hidden": " ({count} don't match the quality profile – only an admin may grab those)",
+        "releases_header": "📦 **Releases for {label}**{season}:",
+        "grab_hint": "Reply with “!grab <no.>” (valid for {minutes} min)",
+        "more_not_shown": " · {count} more not shown",
+        "seeds": "{count} seeds",
+        "rejected_default": "rejected by the profile",
+        "grab_usage": "❓ Usage: “!grab <no.>” – the number from your last “!releases” list.",
+        "no_release_list": "❓ You have no open release list – use “!releases <title>” first.",
+        "release_list_expired": "⌛ Your release list has expired – please run “!releases” again.",
+        "pick_range": "❓ Please pick a number from 1 to {count}.",
+        "admin_only": "⛔ “{title}” doesn't match the quality profile ({reason}). Only an admin may download it.",
+        "not_in_cache": "⌛ The release is no longer in {arr}'s cache – please run “!releases” again.",
+        "downloading": "⬇️ **Downloading:** {title}\nfor {label} – it will be announced {where} once it's done.{override}",
+        "admin_override": "\n⚠️ Admin override: doesn't actually match the profile.",
+        "release_usage": ("❓ Usage: “!release <exact release name>”, "
+                          "e.g. “!release Example.Movie.2024.2160p.WEB-DL.DDP5.1-GROUP”."),
+        "season_missing_in_name": ("❓ The release name has no season (e.g. S02). For anime with absolute episode "
+                                   "numbers please use “!releases <title> s<season>”."),
+        "cannot_read_name": "❓ I couldn't read the release name – is it spelled correctly?",
+        "no_title_for": "🔍 I can't find a movie/show for “{title}”{year} in {arr}.",
+        "searching_release": "🔎 Searching “{name}” at the indexers … (may take a while)",
+        "similar_releases": "🔍 “{name}” doesn't exist like that – similar releases for {label}:",
+        "release_not_found": "🔍 The indexers don't have “{name}” (any more){checked}.",
+        "checked": " (checked: {titles})",
+        # Radarr/Sonarr errors
+        "arr_forbidden": "⚠️ {arr} denies access (wrong API key?) – please tell an admin.",
+        "arr_error": "⚠️ {arr} reports an error: {reason}",
+        "arr_unreachable": "⚠️ {arr} is not reachable right now. Please try again later.",
+        "arr_too_much": "⚠️ {arr} returned too much data.",
+        "arr_unexpected": "⚠️ {arr} answered unexpectedly – please tell an admin.",
+        "arr_misconfigured": "⚠️ {arr} is not set up correctly – please tell an admin.",
+    },
+    "de": {
+        "new_movie": "🎬 **Neuer Film:** {title}",
+        "quality": "Qualität: {quality}",
+        "requested_by": "🙋 Angefragt von {name}",
+        "new_episode": "Neue Folge",
+        "new_episodes": "{count} neue Folgen",
+        "season": "Staffel {n}",
+        "specials": "Specials",
+        "more_episodes": "… und {count} weitere",
+        "test_ok": "✅ Verbindungstest von {source} erfolgreich.",
+        "unknown_movie": "Unbekannter Film",
+        "unknown_series": "Unbekannte Serie",
+        "usage": ("ℹ️ **So fragst du etwas an:**\n"
+                  "!request <Titel> – Film oder Serie; geladen wird passend zum Qualitätsprofil\n"
+                  "Bei Serien fragt der Bot nach der Staffel (0 = alle) – oder direkt: „!request Beispielserie s2“\n"
+                  "!request film <Titel> / !request serie <Titel> – nur Filme / nur Serien\n"
+                  "Tipp: Jahr anhängen, z. B. „!request Beispielfilm 2021“\n"
+                  "\n"
+                  "**Bestimmtes Release wählen:**\n"
+                  "!releases <Titel> – Release-Liste der Indexer (Serien: „!releases <Titel> s2“)\n"
+                  "!releases – Liste für deinen zuletzt gewählten Titel\n"
+                  "!grab <Nr> – Release aus der Liste laden\n"
+                  "!release <Release-Name> – genau dieses Release laden\n"
+                  "\n"
+                  "Tipp: Auf eine Liste des Bots kannst du auch einfach mit der Nummer antworten (Zitat).\n"
+                  "!id – schickt dir deine Signal-ID privat (für Admin-Einstellungen)"),
+        "someone": "jemand",
+        "here": "hier",
+        "in_group": "in der Gruppe",
+        "slow_down": "🐢 Zu viele Befehle auf einmal – bitte eine Minute warten.",
+        "internal_error": "⚠️ Da ist intern etwas schiefgelaufen – bitte später nochmal versuchen.",
+        "not_allowed": "⛔ Du bist für Anfragen nicht freigeschaltet.",
+        "id_header": "🆔 **Deine Signal-IDs** (für REQUEST_ADMINS / REQUEST_ALLOWED_SENDERS):",
+        "id_number": "Nummer: {value}",
+        "id_uuid": "UUID: {value}",
+        "id_sent": "📬 Ich habe dir deine ID privat geschickt.",
+        "list_expired": "⌛ Deine Trefferliste ist abgelaufen – bitte nochmal suchen.",
+        "title_missing": "❓ Bitte einen Titel angeben, z. B. „{action} Beispielfilm“.",
+        "movies": "Filme",
+        "shows": "Serien",
+        "cannot_request": "⚠️ {kind} können hier nicht angefragt werden.",
+        "cannot_request_media": "⚠️ Filme/Serien können hier nicht angefragt werden.",
+        "nothing_found": "🔍 Nichts gefunden für „{query}“.",
+        "tip_release": "Tipp: Für einen Release-Namen nimm „!release {query}“.",
+        "results": "🔍 **Treffer für „{query}“:**",
+        "already_there": " – schon vorhanden",
+        "reply_with": "Antworte mit „{action} <Nr>{hint}“ (gilt {minutes} Min.)",
+        "limit": ("⛔ Du hast in den letzten 24 Stunden schon {count} Titel angefragt (Limit {limit}). "
+                  "Bitte später nochmal."),
+        "seasons_count_1": "1 Staffel",
+        "seasons_count": "{count} Staffeln",
+        "which_season_q": "📺 **{label}** – welche Staffel?",
+        "all_seasons_item": "0. Alle Staffeln",
+        "season_item": "{n}. Staffel {n}",
+        "episodes_count": " ({count} Folgen)",
+        "season_available": " ✔️ vorhanden",
+        "season_requested": " ⏳ angefragt",
+        "season_list_expired": "⌛ Die Staffelauswahl ist abgelaufen – bitte nochmal „!request <Titel>“.",
+        "what_all": "alle Staffeln",
+        "what_one": "Staffel {n}",
+        "what_many": "Staffeln {numbers}",
+        "season_complete": "{label} – {what} ist schon vollständig da 🍿",
+        "already_in_arr": "{label} ist schon in {arr} vorhanden 📚",
+        "series_requested": ("✅ **Angefragt:** {label} – {what}\n"
+                             "Sonarr sucht jetzt passend zum Qualitätsprofil – neue Folgen werden {where} "
+                             "angekündigt.{upcoming}"),
+        "upcoming": "\n📅 Die Serie ist noch nicht gestartet – Folgen werden geladen, sobald sie erscheinen.",
+        "no_such_season": "❓ Staffel {season} gibt es bei {label} nicht. Verfügbar: {known}.",
+        "none": "keine",
+        "movie_available": "{label} ist schon verfügbar 🍿",
+        "movie_searching": "{label} ist schon angefragt und wird gesucht ⏳{hint}",
+        "movie_remonitored": ("✅ **Angefragt:** {label}\nWar in Radarr, wurde aber nicht gesucht – jetzt wieder aktiv. "
+                              "Sobald es da ist, wird es {where} angekündigt.{hint}"),
+        "movie_requested": ("✅ **Angefragt:** {label}\n{arr} sucht jetzt danach – sobald es da ist, wird es {where} "
+                            "angekündigt.{hint}\nLieber ein bestimmtes Release? → „!releases“"),
+        "release_hint": "\n📅 Noch nicht als Download erschienen{when} – wird automatisch geladen, sobald es verfügbar ist.",
+        "release_hint_when": " (voraussichtlich ab {date})",
+        "added_no_search": "➕ {label} wurde zu {arr} hinzugefügt (ohne automatische Suche).",
+        "which_title": "❓ Für welchen Titel? Z. B. „!releases Beispielfilm 2021“ oder „!releases Beispielserie s2“.",
+        "which_season": "❓ Welche Staffel von {label}? Z. B. „!releases s1“.{known}",
+        "available_seasons": " Verfügbar: {numbers}.",
+        "searching_releases": "🔎 Suche Releases für {what} bei den Indexern … (kann bis zu einer Minute dauern)",
+        "season_suffix": " – Staffel {n}",
+        "not_found_in_arr": "⚠️ {label} ist in {arr} nicht auffindbar.",
+        "no_releases": "📭 Keine passenden Releases für {label} gefunden{extra}.",
+        "no_releases_hidden": " ({count} passen nicht zum Qualitätsprofil – die darf nur ein Admin holen)",
+        "releases_header": "📦 **Releases für {label}**{season}:",
+        "grab_hint": "Antworte mit „!grab <Nr>“ (gilt {minutes} Min.)",
+        "more_not_shown": " · {count} weitere nicht angezeigt",
+        "seeds": "{count} Seeds",
+        "rejected_default": "vom Profil abgelehnt",
+        "grab_usage": "❓ Nutzung: „!grab <Nr>“ – die Nummer aus deiner letzten „!releases“-Liste.",
+        "no_release_list": "❓ Du hast keine offene Release-Liste – erst „!releases <Titel>“.",
+        "release_list_expired": "⌛ Deine Release-Liste ist abgelaufen – bitte „!releases“ nochmal ausführen.",
+        "pick_range": "❓ Bitte eine Nummer von 1 bis {count} wählen.",
+        "admin_only": "⛔ „{title}“ passt nicht zum Qualitätsprofil ({reason}). Das darf nur ein Admin laden.",
+        "not_in_cache": ("⌛ Das Release ist nicht mehr im Zwischenspeicher von {arr} – "
+                         "bitte „!releases“ nochmal ausführen."),
+        "downloading": "⬇️ **Wird geladen:** {title}\nfür {label} – sobald es fertig ist, wird es {where} angekündigt.{override}",
+        "admin_override": "\n⚠️ Admin-Override: passt eigentlich nicht zum Profil.",
+        "release_usage": ("❓ Nutzung: „!release <exakter Release-Name>“, "
+                          "z. B. „!release Beispielfilm.2024.2160p.WEB-DL.DDP5.1-GROUP“."),
+        "season_missing_in_name": ("❓ Im Release-Namen fehlt die Staffel (z. B. S02). Bei Anime mit durchgehender "
+                                   "Folgennummer bitte „!releases <Titel> s<Staffel>“ nutzen."),
+        "cannot_read_name": "❓ Den Release-Namen konnte ich nicht lesen – stimmt die Schreibweise?",
+        "no_title_for": "🔍 Zu „{title}“{year} finde ich in {arr} keinen Film/keine Serie.",
+        "searching_release": "🔎 Suche „{name}“ bei den Indexern … (kann etwas dauern)",
+        "similar_releases": "🔍 „{name}“ gibt es so nicht – ähnliche Releases für {label}:",
+        "release_not_found": "🔍 „{name}“ haben die Indexer nicht (mehr){checked}.",
+        "checked": " (geprüft: {titles})",
+        "arr_forbidden": "⚠️ {arr} verweigert den Zugriff (API-Key falsch?) – bitte Admin Bescheid geben.",
+        "arr_error": "⚠️ {arr} meldet einen Fehler: {reason}",
+        "arr_unreachable": "⚠️ {arr} ist gerade nicht erreichbar. Bitte später nochmal versuchen.",
+        "arr_too_much": "⚠️ {arr} hat zu viele Daten geliefert.",
+        "arr_unexpected": "⚠️ {arr} antwortet unerwartet – bitte Admin Bescheid geben.",
+        "arr_misconfigured": "⚠️ {arr} ist nicht richtig eingerichtet – bitte Admin Bescheid geben.",
+    },
+}
+
+
+def t(key: str, **values) -> str:
+    """Bot text in BOT_LANGUAGE (falls back to English)."""
+    template = MESSAGES.get(BOT_LANGUAGE, {}).get(key) or MESSAGES["en"][key]
+    return template.format(**values) if values else template
+
+
+def _fmt_date(iso_date: str) -> str:
+    """'2099-05-01' -> en: 2099-05-01, de: 01.05.2099"""
+    if BOT_LANGUAGE == "de":
+        return f"{iso_date[8:10]}.{iso_date[5:7]}.{iso_date[:4]}"
+    return iso_date
+
+
+# --------------------------------------------------------------------------- #
+# Data models
 # --------------------------------------------------------------------------- #
 
 
@@ -177,22 +438,22 @@ class EpisodeGroup:
     qualities: set[str] = field(default_factory=set)
     poster: Poster | None = None
     requester: str = ""
-    due: float = 0.0                 # Zeitpunkt, ab dem die gesammelten Folgen gepostet werden
+    due: float = 0.0                 # when the collected episodes get posted
 
 
 USER_AGENT = f"signal-media-relay/{__version__}"
 
 
 def _norm(text: str) -> str:
-    """Vergleichsform: Akzente weg, nur Buchstaben/Ziffern – auch fuer nicht-lateinische Titel
-    (vorher wurden z. B. japanische Titel zu "" und kollidierten in der Duplikaterkennung)."""
+    """Comparison form: accents removed, letters/digits only – also for non-Latin titles
+    (these used to become "" and collided in duplicate detection)."""
     text = unicodedata.normalize("NFKD", (text or "").casefold())
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     return re.sub(r"[\W_]+", "", text)
 
 
-# Signal "styled" Text: *kursiv*, **fett**, ~durchgestrichen~, `mono`, ||Spoiler||.
-# Fremde Texte (Titel, Namen, Release-Namen) duerfen das Layout nicht kaputtmachen.
+# Signal "styled" text: *italic*, **bold**, ~strikethrough~, `mono`, ||spoiler||.
+# Foreign text (titles, names, release names) must not break the layout.
 _STYLE_MARKERS = str.maketrans({"*": "∗", "~": "∼", "`": "ˋ", "|": "∣"})
 
 
@@ -214,11 +475,11 @@ def _to_int(value) -> int | None:
         return None
 
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩]")
+_CONTROL_CHARS = re.compile("[\x00-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩]")
 
 
 def _clean(value, limit: int = MAX_FIELD_CHARS) -> str:
-    """Fremde Strings entschaerfen: Steuerzeichen/Zeilenumbrueche/Bidi raus, Laenge begrenzen."""
+    """Defuse foreign strings: remove control/newline/bidi characters, limit length."""
     if value is None:
         return ""
     text = _CONTROL_CHARS.sub(" ", str(value))
@@ -231,7 +492,7 @@ def _redact(text: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Ausgehende HTTP-Requests (abgesichert gegen SSRF)
+# Outgoing HTTP requests (hardened against SSRF)
 # --------------------------------------------------------------------------- #
 
 
@@ -247,11 +508,11 @@ def _url_allowed(url: str) -> bool:
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Redirects nur auf erlaubte Hosts; Auth-Header nie an fremde Hosts weiterreichen."""
+    """Redirects only to allowed hosts; never forward auth headers to other hosts."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not _url_allowed(newurl):
-            raise urllib.error.URLError(f"Redirect auf nicht erlaubte URL blockiert: {newurl}")
+            raise urllib.error.URLError(f"redirect to a URL that is not allowed was blocked: {newurl}")
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is not None and urllib.parse.urlsplit(newurl).netloc != urllib.parse.urlsplit(req.full_url).netloc:
             for name in list(new.headers):
@@ -261,7 +522,7 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _build_opener(redirects: bool) -> urllib.request.OpenerDirector:
-    # Bewusst kein build_opener(): der wuerde auch file://, ftp:// und data: unterstuetzen.
+    # Deliberately not build_opener(): that would also support file://, ftp:// and data:.
     opener = urllib.request.OpenerDirector()
     handlers = [urllib.request.UnknownHandler(), urllib.request.HTTPHandler(),
                 urllib.request.HTTPSHandler(), urllib.request.HTTPDefaultErrorHandler(),
@@ -273,37 +534,37 @@ def _build_opener(redirects: bool) -> urllib.request.OpenerDirector:
     return opener
 
 
-_FETCH_OPENER = _build_opener(redirects=True)    # Poster / Jellyfin
+_FETCH_OPENER = _build_opener(redirects=True)    # posters / Jellyfin
 _SIGNAL_OPENER = _build_opener(redirects=False)  # signal-cli-rest-api
 
 
 def _http_get(url: str, headers: dict[str, str] | None = None, timeout: float = 10.0,
               max_bytes: int = MAX_POSTER_BYTES) -> tuple[bytes, str]:
     if not _url_allowed(url):
-        raise ValueError("URL nicht erlaubt (Schema/Host nicht in POSTER_ALLOWED_HOSTS)")
+        raise ValueError("URL not allowed (scheme/host not in POSTER_ALLOWED_HOSTS)")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
     with _FETCH_OPENER.open(req, timeout=timeout) as resp:
         content_type = resp.headers.get("Content-Type", "")
         data = resp.read(max_bytes + 1)
     if len(data) > max_bytes:
-        raise ValueError("Antwort zu gross")
+        raise ValueError("response too large")
     return data, content_type
 
 
 def _fetch_poster_b64(poster: Poster) -> str | None:
     try:
-        # Grosszuegiger Timeout: Jellyfin skaliert Bilder neuer Titel beim ersten Abruf erst (kann >10 s dauern)
+        # Generous timeout: Jellyfin resizes images of new titles on first request (can take >10 s)
         data, content_type = _http_get(poster.url, poster.headers, timeout=30)
         if not content_type.lower().startswith("image/"):
-            raise ValueError(f"kein Bild (Content-Type {content_type!r})")
+            raise ValueError(f"not an image (Content-Type {content_type!r})")
         return base64.b64encode(data).decode("ascii")
-    except Exception as exc:  # noqa: BLE001 - Poster ist optional
-        log.warning("Poster konnte nicht geladen werden (%s): %s", poster.url, exc)
+    except Exception as exc:  # noqa: BLE001 - posters are optional
+        log.warning("Could not load poster (%s): %s", poster.url, exc)
         return None
 
 
 # --------------------------------------------------------------------------- #
-# Signal-Versand
+# Sending to Signal
 # --------------------------------------------------------------------------- #
 
 
@@ -333,7 +594,7 @@ def send_signal(msg: OutgoingMessage) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Relay-Kern: Deduplizierung, Buendelung, Versand-Queue
+# Relay core: de-duplication, bundling, send queue
 # --------------------------------------------------------------------------- #
 
 
@@ -342,11 +603,11 @@ class Relay:
         self._lock = threading.Lock()
         self._pending: dict[str, EpisodeGroup] = {}
         self._seen: dict[str, float] = {}
-        self._requested: dict[str, tuple[str, float]] = {}   # "movie:<tmdbId>"/"series:<tvdbId>" -> (Name, Zeit)
+        self._requested: dict[str, tuple[str, float]] = {}   # "movie:<tmdbId>"/"series:<tvdbId>" -> (name, time)
         self._outbox: "queue.Queue[OutgoingMessage]" = queue.Queue(maxsize=MAX_OUTBOX)
         threading.Thread(target=self._sender_loop, name="signal-sender", daemon=True).start()
-        # Ein einziger Thread verschickt faellige Folgen-Buendel. Frueher: ein Timer-Thread pro Serie –
-        # bei einem grossen Import (viele Serien gleichzeitig) sprengte das pids_limit des Containers.
+        # A single thread posts bundles that are due. Previously: one timer thread per show –
+        # a large import (many shows at once) blew the container's pids_limit.
         threading.Thread(target=self._flusher_loop, name="episode-flusher", daemon=True).start()
 
     def _flusher_loop(self) -> None:
@@ -362,19 +623,19 @@ class Relay:
         try:
             self._outbox.put_nowait(msg)
         except queue.Full:
-            log.error("Versand-Queue voll (%d) – Nachricht verworfen: %s", MAX_OUTBOX, msg.text.splitlines()[0])
+            log.error("Send queue full (%d) – message dropped: %s", MAX_OUTBOX, msg.text.splitlines()[0])
 
     def send(self, text: str, *, recipient: str | None = None, quote: dict | None = None,
              poster: Poster | None = None) -> None:
         self._enqueue(OutgoingMessage(text, poster, recipient, quote))
 
-    # -- Wer hat was angefragt? (fuer "Angefragt von ..." in der Ankuendigung) --
+    # -- Who requested what? (for "Requested by ..." in the announcement) --------
     def note_requester(self, key: str, name: str) -> None:
         now = time.time()
         with self._lock:
-            for k in [k for k, (_, t) in self._requested.items() if now - t > 30 * 86400]:
+            for k in [k for k, (_, ts) in self._requested.items() if now - ts > 30 * 86400]:
                 del self._requested[k]
-            self._requested.setdefault(key, (name, now))   # die erste anfragende Person bleibt genannt
+            self._requested.setdefault(key, (name, now))   # the first person who asked stays credited
 
     def pop_requester(self, key: str) -> str:
         if not key:
@@ -388,47 +649,47 @@ class Relay:
         while self._outbox.unfinished_tasks and time.time() < deadline:
             time.sleep(0.2)
 
-    # -- Deduplizierung ---------------------------------------------------- #
+    # -- De-duplication ---------------------------------------------------------- #
     def _is_dupe(self, key: str) -> bool:
-        """True, wenn key innerhalb von DEDUPE_HOURS schon angekuendigt wurde."""
+        """True if key was already announced within DEDUPE_HOURS."""
         if DEDUPE_HOURS <= 0:
             return False
         now = time.time()
         ttl = DEDUPE_HOURS * 3600
         with self._lock:
-            for k in [k for k, t in self._seen.items() if now - t > ttl]:
+            for k in [k for k, ts in self._seen.items() if now - ts > ttl]:
                 del self._seen[k]
             if key in self._seen:
                 return True
             self._seen[key] = now
             return False
 
-    # -- Filme -------------------------------------------------------------- #
+    # -- Movies -------------------------------------------------------------------- #
     def add_movie(self, *, title: str, year: str, overview: str, quality: str,
                   poster: Poster | None, source: str, requester_key: str = "") -> None:
         if self._is_dupe(f"movie|{_norm(title)}|{year}"):
-            log.info("Film bereits angekuendigt, uebersprungen: %s (%s)", title, year)
+            log.info("Movie already announced, skipped: %s (%s)", title, year)
             return
         requester = self.pop_requester(requester_key)
-        lines = [f"🎬 **Neuer Film:** {_plain(title)}" + (f" ({_plain(year)})" if year else "")]
+        lines = [t("new_movie", title=_plain(title)) + (f" ({_plain(year)})" if year else "")]
         if quality:
-            lines.append(f"Qualität: {_plain(quality)}")
+            lines.append(t("quality", quality=_plain(quality)))
         if requester:
-            lines.append(f"🙋 Angefragt von {_plain(requester)}")
+            lines.append(t("requested_by", name=_plain(requester)))
         if overview:
             lines.append("")
             lines.append(f"*{_plain(_truncate(overview, OVERVIEW_MAX_CHARS))}*")
-        log.info("[%s] Film: %s (%s)", source, title, year)
+        log.info("[%s] Movie: %s (%s)", source, title, year)
         self._enqueue(OutgoingMessage("\n".join(lines), poster))
 
-    # -- Episoden (gebuendelt pro Serie + Staffel) -------------------------- #
+    # -- Episodes (bundled per show + season) ---------------------------------------- #
     def add_episodes(self, *, series: str, year: str, episodes: list[tuple[int, int, str]],
                      quality: str, poster: Poster | None, source: str, requester_key: str = "") -> None:
-        """episodes: Liste aus (staffel, folge, titel)."""
+        """episodes: list of (season, episode, title)."""
         requester = self.pop_requester(requester_key)
         for season, number, title in episodes:
             if self._is_dupe(f"ep|{_norm(series)}|{season}|{number}"):
-                log.info("Folge bereits angekuendigt, uebersprungen: %s S%02dE%02d", series, season, number)
+                log.info("Episode already announced, skipped: %s S%02dE%02d", series, season, number)
                 continue
             gkey = f"{_norm(series)}|{season}"
             with self._lock:
@@ -444,7 +705,7 @@ class Relay:
                     group.poster = poster
                 if requester and not group.requester:
                     group.requester = requester
-            log.info("[%s] Folge vorgemerkt: %s S%02dE%02d", source, series, season, number)
+            log.info("[%s] Episode queued: %s S%02dE%02d", source, series, season, number)
 
     def _flush(self, gkey: str) -> None:
         with self._lock:
@@ -456,22 +717,22 @@ class Relay:
     @staticmethod
     def _format_group(g: EpisodeGroup) -> str:
         count = len(g.episodes)
-        label = "Neue Folge" if count == 1 else f"{count} neue Folgen"
-        season_txt = "Specials" if g.season == 0 else f"Staffel {g.season}"
+        label = t("new_episode") if count == 1 else t("new_episodes", count=count)
+        season_txt = t("specials") if g.season == 0 else t("season", n=g.season)
         lines = [f"📺 **{label}:** {_plain(g.series)} – {season_txt}"]
         numbers = sorted(g.episodes)
         for num in numbers[:MAX_EPISODES_LISTED]:
             title = g.episodes[num]
             lines.append(f"S{g.season:02d}E{num:02d}" + (f" – {_plain(title)}" if title else ""))
         if count > MAX_EPISODES_LISTED:
-            lines.append(f"… und {count - MAX_EPISODES_LISTED} weitere")
+            lines.append(t("more_episodes", count=count - MAX_EPISODES_LISTED))
         if g.qualities:
-            lines.append(f"Qualität: {_plain(', '.join(sorted(g.qualities)))}")
+            lines.append(t("quality", quality=_plain(", ".join(sorted(g.qualities)))))
         if g.requester:
-            lines.append(f"🙋 Angefragt von {_plain(g.requester)}")
+            lines.append(t("requested_by", name=_plain(g.requester)))
         return "\n".join(lines)
 
-    # -- Sonstiges ----------------------------------------------------------- #
+    # -- Misc ---------------------------------------------------------------------- #
     def add_text(self, text: str) -> None:
         self._enqueue(OutgoingMessage(text))
 
@@ -494,31 +755,31 @@ class Relay:
         for attempt in range(1, 5):
             try:
                 send_signal(msg)
-                log.info("Signal-Nachricht gesendet: %s", msg.text.splitlines()[0])
+                log.info("Signal message sent: %s", msg.text.splitlines()[0])
                 return
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", "replace")[:500]
-                log.error("Signal-API Fehler %s (Versuch %d/4): %s", exc.code, attempt, detail)
+                log.error("Signal API error %s (attempt %d/4): %s", exc.code, attempt, detail)
                 if 400 <= exc.code < 500 and exc.code != 429:
-                    if msg.quote:   # z. B. Zitat-Autor unbekannt -> ohne Zitat nochmal
-                        log.warning("Senden mit Zitat abgelehnt – neuer Versuch ohne Zitat")
+                    if msg.quote:   # e.g. unknown quote author -> try again without the quote
+                        log.warning("Sending with quote was rejected – retrying without quote")
                         msg.quote = None
                         continue
-                    log.error("Dauerhafter Fehler (Konfiguration? SIGNAL_NUMBER/SIGNAL_RECIPIENT pruefen) "
-                              "– Nachricht verworfen: %s", msg.text.splitlines()[0])
+                    log.error("Permanent error (configuration? check SIGNAL_NUMBER/SIGNAL_RECIPIENT) "
+                              "– message dropped: %s", msg.text.splitlines()[0])
                     return
             except Exception as exc:  # noqa: BLE001
-                log.error("Signal-Versand fehlgeschlagen (Versuch %d/4): %s", attempt, exc)
+                log.error("Sending to Signal failed (attempt %d/4): %s", attempt, exc)
             if attempt < 4:
                 time.sleep(2 ** attempt)
-        log.error("Nachricht endgueltig verworfen: %s", msg.text.splitlines()[0])
+        log.error("Message finally dropped: %s", msg.text.splitlines()[0])
 
 
 RELAY: Relay | None = None
 
 
 # --------------------------------------------------------------------------- #
-# Payload-Parser
+# Payload parsers
 # --------------------------------------------------------------------------- #
 
 
@@ -532,7 +793,7 @@ def _arr_poster(images) -> Poster | None:
         if str(img.get("coverType") or "").lower() == "poster" and isinstance(url, str):
             if _url_allowed(url):
                 return Poster(url)
-            log.warning("Poster-URL nicht erlaubt, ignoriert: %s", _clean(url, 200))
+            log.warning("Poster URL not allowed, ignored: %s", _clean(url, 200))
     return None
 
 
@@ -545,9 +806,9 @@ def _list(value) -> list:
 
 
 def handle_test(source: str) -> str:
-    log.info("Test-Event von %s empfangen", source)
+    log.info("Test event received from %s", source)
     if ANNOUNCE_TESTS:
-        RELAY.add_text(f"✅ Verbindungstest von {source} erfolgreich.")
+        RELAY.add_text(t("test_ok", source=source))
     return "test ok"
 
 
@@ -556,12 +817,12 @@ def handle_sonarr(data: dict) -> str:
     if event == "Test":
         return handle_test("Sonarr")
     if event != "Download":
-        return f"ignoriert: {event}"
+        return f"ignored: {event}"
     if data.get("isUpgrade") and not ANNOUNCE_UPGRADES:
-        return "ignoriert: Upgrade"
+        return "ignored: upgrade"
 
     series = _dict(data.get("series"))
-    title = _clean(series.get("title")) or "Unbekannte Serie"
+    title = _clean(series.get("title")) or t("unknown_series")
     episodes = []
     for ep in _list(data.get("episodes")):
         ep = _dict(ep)
@@ -570,7 +831,7 @@ def handle_sonarr(data: dict) -> str:
             continue
         episodes.append((season, number, _clean(ep.get("title"))))
     if not episodes:
-        return "ignoriert: keine Episoden"
+        return "ignored: no episodes"
 
     quality = _clean(_dict(data.get("episodeFile")).get("quality"), 60)
     tvdb_id = _to_int(series.get("tvdbId"))
@@ -585,15 +846,15 @@ def handle_radarr(data: dict) -> str:
     if event == "Test":
         return handle_test("Radarr")
     if event != "Download":
-        return f"ignoriert: {event}"
+        return f"ignored: {event}"
     if data.get("isUpgrade") and not ANNOUNCE_UPGRADES:
-        return "ignoriert: Upgrade"
+        return "ignored: upgrade"
 
     movie = _dict(data.get("movie"))
     tmdb_id = _to_int(movie.get("tmdbId"))
     RELAY.add_movie(
         requester_key=f"movie:{tmdb_id}" if tmdb_id else "",
-        title=_clean(movie.get("title")) or "Unbekannter Film",
+        title=_clean(movie.get("title")) or t("unknown_movie"),
         year=_clean(movie.get("year"), 4),
         overview=_clean(movie.get("overview"), 2000),
         quality=_clean(_dict(data.get("movieFile")).get("quality"), 60),
@@ -614,13 +875,13 @@ _JELLYFIN_ID = re.compile(r"[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-
 
 
 def _jellyfin_id(value) -> str:
-    """Nur echte Jellyfin-IDs (GUID) zulassen – verhindert Pfadmanipulation mit dem API-Key."""
+    """Only accept real Jellyfin IDs (GUIDs) – prevents path manipulation with the API key."""
     value = str(value or "").strip()
     return value if _JELLYFIN_ID.fullmatch(value) else ""
 
 
 def _jf_text(value, limit: int = MAX_FIELD_CHARS) -> str:
-    # Das Webhook-Plugin (Handlebars) HTML-escaped Werte: "Katz &amp; Maus" -> "Katz & Maus"
+    # The webhook plugin (Handlebars) HTML-escapes values: "Cat &amp; Mouse" -> "Cat & Mouse"
     return _clean(html.unescape(str(value or "")), limit)
 
 
@@ -634,7 +895,7 @@ def _jellyfin_poster(item_id: str) -> Poster | None:
 
 
 def _jellyfin_overview(item_id: str) -> str:
-    """Overview per API nachladen (im Webhook-Template ist es wegen JSON-Escaping heikel)."""
+    """Load the overview via the API (in the webhook template it is risky because of JSON escaping)."""
     if not (JELLYFIN_URL and JELLYFIN_API_KEY and item_id):
         return ""
     try:
@@ -643,7 +904,7 @@ def _jellyfin_overview(item_id: str) -> str:
         items = _list(_dict(json.loads(raw)).get("Items"))
         return _clean(_dict(items[0]).get("Overview"), 2000) if items else ""
     except Exception as exc:  # noqa: BLE001
-        log.warning("Jellyfin-Overview nicht abrufbar: %s", exc)
+        log.warning("Could not load Jellyfin overview: %s", exc)
         return ""
 
 
@@ -652,13 +913,13 @@ def handle_jellyfin(data: dict) -> str:
     if ntype == "Test" or data.get("Event") == "Test":
         return handle_test("Jellyfin")
     if ntype and ntype != "ItemAdded":
-        return f"ignoriert: {ntype}"
+        return f"ignored: {ntype}"
 
     item_type = _clean(data.get("ItemType"), 50)
     if item_type == "Movie":
         item_id = _jellyfin_id(data.get("ItemId"))
         RELAY.add_movie(
-            title=_jf_text(data.get("Name")) or "Unbekannter Film",
+            title=_jf_text(data.get("Name")) or t("unknown_movie"),
             year=_jf_text(data.get("Year"), 4),
             overview=_jf_text(data.get("Overview"), 2000) or _jellyfin_overview(item_id),
             quality="",
@@ -671,9 +932,9 @@ def handle_jellyfin(data: dict) -> str:
         season = _to_int(data.get("SeasonNumber"))
         number = _to_int(data.get("EpisodeNumber"))
         if season is None or number is None or not (0 <= season < 10000 and 0 <= number < 100000):
-            return "ignoriert: Staffel/Folge fehlt"
+            return "ignored: season/episode missing"
         RELAY.add_episodes(
-            series=_jf_text(data.get("SeriesName")) or "Unbekannte Serie",
+            series=_jf_text(data.get("SeriesName")) or t("unknown_series"),
             year=_jf_text(data.get("Year"), 4),
             episodes=[(season, number, _jf_text(data.get("Name")))],
             quality="",
@@ -682,25 +943,25 @@ def handle_jellyfin(data: dict) -> str:
         )
         return "ok"
 
-    return f"ignoriert: ItemType {item_type or '?'}"
+    return f"ignored: ItemType {item_type or '?'}"
 
 
 ROUTES = {"/sonarr": handle_sonarr, "/radarr": handle_radarr, "/jellyfin": handle_jellyfin}
 
 
 # --------------------------------------------------------------------------- #
-# !request: Anfragen aus der Signal-Gruppe an Radarr/Sonarr
+# !request: requests from the Signal group to Radarr/Sonarr
 # --------------------------------------------------------------------------- #
 
 
 def _mask_number(value: str | None) -> str:
-    """Telefonnummern/UUIDs nur gekuerzt loggen."""
+    """Only log phone numbers/UUIDs shortened."""
     value = value or ""
     return f"{value[:3]}…{value[-2:]}" if len(value) > 6 else "…"
 
 
 def _internal_group_id(recipient: str) -> str:
-    """'group.<base64>' (REST-API-ID) -> interne Signal-Gruppen-ID, wie sie in eingehenden Nachrichten steht."""
+    """'group.<base64>' (REST API ID) -> internal Signal group ID as it appears in incoming messages."""
     if not (recipient or "").startswith("group."):
         return ""
     try:
@@ -710,14 +971,14 @@ def _internal_group_id(recipient: str) -> str:
 
 
 class WebSocketClient:
-    """Minimaler WebSocket-Client (RFC 6455) – reicht fuer /v1/receive der signal-cli-rest-api."""
+    """Minimal WebSocket client (RFC 6455) – enough for /v1/receive of signal-cli-rest-api."""
 
     _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
     def __init__(self, url: str, timeout: float = 30.0) -> None:
         parts = urllib.parse.urlsplit(url)
         if parts.scheme not in ("ws", "wss") or not parts.hostname:
-            raise ValueError(f"ungueltige WebSocket-URL: {url}")
+            raise ValueError(f"invalid WebSocket URL: {url}")
         secure = parts.scheme == "wss"
         port = parts.port or (443 if secure else 80)
         sock = socket.create_connection((parts.hostname, port), timeout=timeout)
@@ -736,25 +997,25 @@ class WebSocketClient:
         while b"\r\n\r\n" not in self._buf:
             chunk = sock.recv(4096)
             if not chunk:
-                raise ConnectionError("Handshake abgebrochen")
+                raise ConnectionError("handshake aborted")
             self._buf += chunk
             if len(self._buf) > 65536:
-                raise ConnectionError("Handshake-Antwort zu gross")
+                raise ConnectionError("handshake response too large")
         head, self._buf = self._buf.split(b"\r\n\r\n", 1)
         lines = head.decode("latin-1").split("\r\n")
         status = lines[0].split()
         if len(status) < 2 or status[1] != "101":
-            raise ConnectionError(f"WebSocket abgelehnt: {lines[0]}")
+            raise ConnectionError(f"WebSocket rejected: {lines[0]}")
         headers = {k.strip().lower(): v.strip() for k, _, v in (line.partition(":") for line in lines[1:])}
         expected = base64.b64encode(hashlib.sha1((key + self._GUID).encode()).digest()).decode()
         if headers.get("sec-websocket-accept") != expected:
-            raise ConnectionError("WebSocket-Handshake ungueltig")
+            raise ConnectionError("invalid WebSocket handshake")
 
     def _read_exact(self, n: int) -> bytes:
         while len(self._buf) < n:
             chunk = self.sock.recv(max(4096, n - len(self._buf)))
             if not chunk:
-                raise ConnectionError("Verbindung geschlossen")
+                raise ConnectionError("connection closed")
             self._buf += chunk
         data, self._buf = self._buf[:n], self._buf[n:]
         return data
@@ -768,7 +1029,7 @@ class WebSocketClient:
         elif length == 127:
             length = struct.unpack("!Q", self._read_exact(8))[0]
         if length > MAX_WS_MESSAGE_BYTES:
-            raise ConnectionError("WebSocket-Frame zu gross")
+            raise ConnectionError("WebSocket frame too large")
         mask = self._read_exact(4) if b2 & 0x80 else b""
         payload = self._read_exact(length) if length else b""
         if mask:
@@ -785,11 +1046,11 @@ class WebSocketClient:
             header += bytes([0x80 | 126]) + struct.pack("!H", n)
         else:
             header += bytes([0x80 | 127]) + struct.pack("!Q", n)
-        mask = os.urandom(4)   # Client-Frames muessen maskiert sein
+        mask = os.urandom(4)   # client frames must be masked
         self.sock.sendall(header + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
 
     def recv(self) -> str | None:
-        """Naechste Text-Nachricht; None wenn der Server die Verbindung schliesst."""
+        """Next text message; None if the server closes the connection."""
         fragments: list[bytes] = []
         unanswered_pings = 0
         while True:
@@ -797,9 +1058,9 @@ class WebSocketClient:
                 fin, opcode, payload = self._read_frame()
             except socket.timeout:
                 if self._in_frame or self._buf or fragments:
-                    raise ConnectionError("Timeout mitten in einer Nachricht")
+                    raise ConnectionError("timeout in the middle of a message")
                 if unanswered_pings >= 2:
-                    raise ConnectionError("keine Antwort auf Ping")
+                    raise ConnectionError("no answer to ping")
                 self._send(0x9, b"keepalive")
                 unanswered_pings += 1
                 continue
@@ -817,7 +1078,7 @@ class WebSocketClient:
                 continue
             fragments.append(payload)
             if sum(map(len, fragments)) > MAX_WS_MESSAGE_BYTES:
-                raise ConnectionError("WebSocket-Nachricht zu gross")
+                raise ConnectionError("WebSocket message too large")
             if fin:
                 return b"".join(fragments).decode("utf-8", "replace")
 
@@ -845,7 +1106,7 @@ class ArrError(Exception):
 
 
 def _arr_errors(detail: str) -> list[tuple[str, str]]:
-    """Validierungsfehler aus einer Sonarr/Radarr-Fehlerantwort lesen."""
+    """Read validation errors from a Sonarr/Radarr error response."""
     try:
         data = json.loads(detail)
     except ValueError:
@@ -885,28 +1146,27 @@ class ArrClient:
             detail = exc.read(20000).decode("utf-8", "replace")
             log.warning("%s %s %s -> HTTP %s: %s", self.name, method, path.split("?")[0], exc.code, _clean(detail, 500))
             if exc.code in (401, 403):
-                raise ArrError(f"⚠️ {self.name} verweigert den Zugriff (API-Key falsch?) – bitte Admin Bescheid geben.",
-                               status=exc.code)
+                raise ArrError(t("arr_forbidden", arr=self.name), status=exc.code)
             errors = _arr_errors(detail)
             reason = _clean(errors[0][1], 200) if errors and errors[0][1] else f"HTTP {exc.code}"
-            raise ArrError(f"⚠️ {self.name} meldet einen Fehler: {reason}", status=exc.code, errors=errors)
+            raise ArrError(t("arr_error", arr=self.name, reason=_plain(reason)), status=exc.code, errors=errors)
         except (urllib.error.URLError, OSError) as exc:
-            log.warning("%s nicht erreichbar (%s): %s", self.name, self.url, exc)
-            raise ArrError(f"⚠️ {self.name} ist gerade nicht erreichbar. Bitte später nochmal versuchen.")
+            log.warning("%s not reachable (%s): %s", self.name, self.url, exc)
+            raise ArrError(t("arr_unreachable", arr=self.name))
         if len(raw) > MAX_ARR_RESPONSE_BYTES:
-            raise ArrError(f"⚠️ {self.name} hat zu viele Daten geliefert.")
+            raise ArrError(t("arr_too_much", arr=self.name))
         try:
             return json.loads(raw) if raw.strip() else None
         except ValueError:
-            log.warning("%s: Antwort ist kein JSON – stimmt %s_URL?", self.name, self.kind.upper())
-            raise ArrError(f"⚠️ {self.name} antwortet unerwartet – bitte Admin Bescheid geben.")
+            log.warning("%s: response is not JSON – is %s_URL correct?", self.name, self.kind.upper())
+            raise ArrError(t("arr_unexpected", arr=self.name))
 
     def _get_defaults(self) -> tuple[int, str, dict]:
-        """Qualitaetsprofil, Root-Folder (und bei Sonarr v3 Sprachprofil) einmalig ermitteln."""
+        """Determine quality profile, root folder (and for Sonarr v3 the language profile) once."""
         with self._lock:
             if self._defaults:
                 return self._defaults
-            config_error = ArrError(f"⚠️ {self.name} ist nicht richtig eingerichtet – bitte Admin Bescheid geben.")
+            config_error = ArrError(t("arr_misconfigured", arr=self.name))
             profiles = [p for p in _list(self.call("GET", "/qualityprofile")) if isinstance(p, dict)]
             wanted = self.quality_profile.strip()
             if wanted:
@@ -915,8 +1175,8 @@ class ArrClient:
             else:
                 profile = profiles[0] if profiles else None
             if not profile:
-                log.error("%s: Qualitaetsprofil %r nicht gefunden. Vorhanden: %s", self.name, wanted,
-                          ", ".join(f"{p.get('name')} (id {p.get('id')})" for p in profiles) or "keine")
+                log.error("%s: quality profile %r not found. Available: %s", self.name, wanted,
+                          ", ".join(f"{p.get('name')} (id {p.get('id')})" for p in profiles) or "none")
                 raise config_error
             folders = [f for f in _list(self.call("GET", "/rootfolder")) if isinstance(f, dict)]
             wanted_folder = self.root_folder.strip().rstrip("/\\")
@@ -925,18 +1185,18 @@ class ArrClient:
             else:
                 folder = folders[0] if folders else None
             if not folder:
-                log.error("%s: Root-Folder %r nicht gefunden. Vorhanden: %s", self.name, wanted_folder,
-                          ", ".join(str(f.get("path")) for f in folders) or "keine")
+                log.error("%s: root folder %r not found. Available: %s", self.name, wanted_folder,
+                          ", ".join(str(f.get("path")) for f in folders) or "none")
                 raise config_error
             extra: dict = {}
             if self.kind == "sonarr":
                 version = str(_dict(self.call("GET", "/system/status")).get("version", ""))
-                if version.startswith("3."):   # Sonarr v3 braucht noch ein Sprachprofil
+                if version.startswith("3."):   # Sonarr v3 still needs a language profile
                     languages = _list(self.call("GET", "/languageprofile"))
                     if languages:
                         extra["languageProfileId"] = _dict(languages[0]).get("id")
             self._defaults = (int(profile["id"]), str(folder["path"]), extra)
-            log.info("%s: nutze Qualitaetsprofil '%s' und Root-Folder '%s'", self.name, profile.get("name"), folder["path"])
+            log.info("%s: using quality profile '%s' and root folder '%s'", self.name, profile.get("name"), folder["path"])
             return self._defaults
 
     def lookup(self, term: str) -> list[dict]:
@@ -945,8 +1205,8 @@ class ArrClient:
         return [r for r in _list(result) if isinstance(r, dict)]
 
     def add(self, item: dict, search: bool = True, seasons: set[int] | None = None) -> dict:
-        """Titel hinzufuegen. search=False: nur ueberwachen, keine automatische Suche starten.
-        seasons (nur Sonarr): genau diese Staffeln ueberwachen; None = SONARR_MONITOR."""
+        """Add a title. search=False: only monitor, don't start an automatic search.
+        seasons (Sonarr only): monitor exactly these seasons; None = SONARR_MONITOR."""
         profile_id, root_folder, extra = self._get_defaults()
         body = dict(item)
         body.update(qualityProfileId=profile_id, rootFolderPath=root_folder, monitored=True, **extra)
@@ -957,7 +1217,7 @@ class ArrClient:
         body["seasonFolder"] = True
         monitor = SONARR_MONITOR
         if seasons is not None:
-            # Getestet mit Sonarr v4: Staffel-Flags + monitor "skip" -> genau diese Staffeln samt Folgen
+            # Tested with Sonarr v4: season flags + monitor "skip" -> exactly these seasons incl. episodes
             body["seasons"] = [dict(_dict(s), monitored=_to_int(_dict(s).get("seasonNumber")) in seasons)
                                for s in _list(item.get("seasons"))]
             monitor = "skip"
@@ -969,14 +1229,14 @@ class ArrClient:
         return _dict(self.call("GET", f"/movie/{movie_id}"))
 
     def monitor_movie(self, movie_id: int) -> None:
-        """Vorhandenen, nicht ueberwachten Film wieder ueberwachen und suchen (getestet mit Radarr)."""
+        """Monitor and search an existing, unmonitored movie again (tested with Radarr)."""
         movie = self.movie(movie_id)
         movie["monitored"] = True
         self.call("PUT", f"/movie/{movie_id}", movie)
         self.call("POST", "/command", {"name": "MoviesSearch", "movieIds": [movie_id]})
 
     def remove(self, item_id: int) -> None:
-        """Nur fuer Titel, die der Bot im selben Befehl selbst (ohne Suche) hinzugefuegt hat. Loescht keine Dateien."""
+        """Only for titles the bot added itself (without search) in the same command. Never deletes files."""
         if self.kind == "radarr":
             self.call("DELETE", f"/movie/{item_id}?deleteFiles=false&addImportExclusion=false")
         else:
@@ -986,7 +1246,7 @@ class ArrClient:
         return _dict(self.call("GET", f"/series/{series_id}"))
 
     def monitor_seasons(self, series_id: int, seasons: set[int]) -> None:
-        """Bestehende Serie: Staffeln zusaetzlich ueberwachen und danach suchen lassen."""
+        """Existing show: additionally monitor seasons, then search for them."""
         series = self.series(series_id)
         series["monitored"] = True
         series["seasons"] = [dict(_dict(s), monitored=bool(_dict(s).get("monitored"))
@@ -1000,11 +1260,11 @@ class ArrClient:
             self.call("POST", "/command", {"name": "SeriesSearch", "seriesId": series_id})
 
     def parse(self, release_name: str) -> dict:
-        """Release-Namen von Radarr/Sonarr zerlegen lassen (erkennt Titel, Jahr, Staffel/Folge)."""
+        """Let Radarr/Sonarr parse a release name (title, year, season/episode)."""
         return _dict(self.call("GET", f"/parse?title={urllib.parse.quote(release_name)}"))
 
     def releases(self, item_id: int, season: int | None = None, episode_id: int | None = None) -> list[dict]:
-        """Interaktive Suche bei den Indexern – dieselbe Liste wie "Interactive Search" im UI."""
+        """Interactive search at the indexers – the same list as "Interactive Search" in the UI."""
         if self.kind == "radarr":
             path = f"/release?movieId={item_id}"
         elif episode_id:
@@ -1048,7 +1308,8 @@ class Candidate:
         if details and not self.is_movie:
             seasons = [s for s in _list(self.item.get("seasons")) if _to_int(_dict(s).get("seasonNumber"))]
             if seasons:
-                text += f" – {len(seasons)} Staffel{'n' if len(seasons) != 1 else ''}"
+                count = len(seasons)
+                text += " – " + (t("seasons_count_1") if count == 1 else t("seasons_count", count=count))
         return text
 
     def poster(self) -> Poster | None:
@@ -1068,45 +1329,30 @@ class Command:
     timestamp: int
     in_group: bool
     reply_to: str
-    quote_timestamp: int = 0         # bei bearbeiteten Nachrichten: die urspruengliche Nachricht
+    quote_timestamp: int = 0         # for edited messages: the original message
 
     @property
     def sender(self) -> str:
         return self.uuid or self.number
 
 
-USAGE = ("ℹ️ **So fragst du etwas an:**\n"
-         "!request <Titel> – Film oder Serie; geladen wird passend zum Qualitätsprofil\n"
-         "Bei Serien fragt der Bot nach der Staffel (0 = alle) – oder direkt: „!request Beispielserie s2“\n"
-         "!request film <Titel> / !request serie <Titel> – nur Filme / nur Serien\n"
-         "Tipp: Jahr anhängen, z. B. „!request Beispielfilm 2021“\n"
-         "\n"
-         "**Bestimmtes Release wählen:**\n"
-         "!releases <Titel> – Release-Liste der Indexer (Serien: „!releases <Titel> s2“)\n"
-         "!releases – Liste für deinen zuletzt gewählten Titel\n"
-         "!grab <Nr> – Release aus der Liste laden\n"
-         "!release <Release-Name> – genau dieses Release laden\n"
-         "\n"
-         "Tipp: Auf eine Liste des Bots kannst du auch einfach mit der Nummer antworten (Zitat).\n"
-         "!id – schickt dir deine Signal-ID privat (für Admin-Einstellungen)")
 _COMMANDS = ("!request", "!releases", "!release", "!grab", "!help", "!hilfe", "!id")
-_LIST_HINT = re.compile(r"„(!request|!releases|!grab) <Nr>")   # steht in jeder Auswahlliste des Bots
-_SEASON_SUFFIX = re.compile(r"\s+(?:s|staffel\s*)(\d{1,2})$", re.IGNORECASE)
+# Every selection list of the bot contains this hint (both languages)
+_LIST_HINT = re.compile(r"[„“\"](!request|!releases|!grab) <(?:Nr|no\.)>")
+_SEASON_SUFFIX = re.compile(r"\s+(?:s|season\s*|staffel\s*)(\d{1,2})$", re.IGNORECASE)
 _EPISODE_TAG = re.compile(r"\bS\d{1,2}(?:E\d{1,3})?\b", re.IGNORECASE)
-
-
 _UMLAUTS = (("ae", "ä"), ("oe", "ö"), ("ue", "ü"), ("Ae", "Ä"), ("Oe", "Ö"), ("Ue", "Ü"))
 
 
 def _with_umlauts(text: str) -> str:
-    """Release-Namen schreiben Umlaute aus ("Verrueckte") – die Titelsuche findet aber nur "Verrückte"."""
+    """German release names spell out umlauts ("Verrueckte") – the title search only finds "Verrückte"."""
     for plain, umlaut in _UMLAUTS:
         text = text.replace(plain, umlaut)
     return text
 
 
 def _fold(text: str) -> str:
-    """Vergleichsform: Umlaute ausgeschrieben, nur Kleinbuchstaben/Ziffern."""
+    """Comparison form: umlauts spelled out, lowercase letters/digits only."""
     text = (text or "").lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
     return _norm(text)
 
@@ -1121,16 +1367,16 @@ def _fmt_size(value) -> str:
 def _rejection(release: dict) -> str:
     reasons = _list(release.get("rejections"))
     if not reasons:
-        return "vom Profil abgelehnt"
+        return t("rejected_default")
     first = reasons[0]
-    return _clean(first.get("reason") if isinstance(first, dict) else first, 120) or "vom Profil abgelehnt"
+    return _clean(first.get("reason") if isinstance(first, dict) else first, 120) or t("rejected_default")
 
 
 def _release_lines(index: int, release: dict) -> str:
     quality = _dict(_dict(release.get("quality")).get("quality")).get("name")
     facts = [_clean(quality, 30), _fmt_size(release.get("size"))]
     if release.get("protocol") == "torrent" and release.get("seeders") is not None:
-        facts.append(f"{_to_int(release.get('seeders')) or 0} Seeds")
+        facts.append(t("seeds", count=_to_int(release.get("seeders")) or 0))
     facts.append(_clean(release.get("indexer"), 30))
     text = f"{index}. {_plain(_clean(release.get('title'), 100))}\n    " + _plain(" · ".join(f for f in facts if f))
     if not release.get("approved"):
@@ -1139,27 +1385,29 @@ def _release_lines(index: int, release: dict) -> str:
 
 
 def _release_hint(item: dict) -> str:
-    """Hinweis fuer Filme, die noch nicht erschienen sind (Radarr laedt dann erst spaeter)."""
+    """Hint for movies that are not released yet (Radarr will only download them later)."""
     status = str(item.get("status") or "").lower()
     if status not in ("announced", "incinemas", "tba"):
         return ""
     today = time.strftime("%Y-%m-%d")
     dates = sorted(str(item.get(k))[:10] for k in ("digitalRelease", "physicalRelease")
                    if item.get(k) and str(item.get(k))[:10] >= today)
-    when = f" (voraussichtlich ab {dates[0][8:10]}.{dates[0][5:7]}.{dates[0][:4]})" if dates else ""
-    return f"\n📅 Noch nicht als Download erschienen{when} – wird automatisch geladen, sobald es verfügbar ist."
+    when = t("release_hint_when", date=_fmt_date(dates[0])) if dates else ""
+    return t("release_hint", when=when)
 
 
 _RELEASE_JUNK = re.compile(r"\.(mkv|mp4|avi|m4v|ts|wmv|nzb|torrent)$", re.IGNORECASE)
 
 
 def _clean_release_name(text: str) -> str:
-    """Eingefuegte Release-Namen aufraeumen: Anfuehrungszeichen/Backticks/<>, Dateiendung."""
+    """Tidy up pasted release names: quotes/backticks/<>, file extension."""
     text = _clean(text, 250).strip().strip("\"'`„“”‚‘’<>«»").strip()
     return _RELEASE_JUNK.sub("", text)
 
-_KIND_WORDS = {"film": "radarr", "filme": "radarr", "movie": "radarr",
-               "serie": "sonarr", "serien": "sonarr", "series": "sonarr", "show": "sonarr", "tv": "sonarr"}
+
+_KIND_WORDS = {"film": "radarr", "filme": "radarr", "movie": "radarr", "movies": "radarr",
+               "serie": "sonarr", "serien": "sonarr", "series": "sonarr", "show": "sonarr", "shows": "sonarr",
+               "tv": "sonarr"}
 _TRAILING_YEAR = re.compile(r"^(.*\S)\s+\(?((?:19|20)\d{2})\)?$")
 
 
@@ -1173,29 +1421,29 @@ class RequestService:
         self.group_id = _internal_group_id(SIGNAL_RECIPIENT)
         self._commands: "queue.Queue[Command]" = queue.Queue(maxsize=100)
         self._pending: dict[str, tuple[float, list[Candidate]]] = {}
-        self._adds: dict[str, list[tuple[float, str]]] = {}   # (Zeit, Titel-Key) fuer das Limit
+        self._adds: dict[str, list[tuple[float, str]]] = {}   # (time, title key) for the daily limit
         self._recent: dict[str, list[float]] = {}
         self._warned: dict[str, float] = {}
-        self._last_title: dict[str, tuple[float, Candidate]] = {}                 # fuer "!releases" ohne Titel
-        self._season_lists: dict[str, tuple[float, Candidate, list[int]]] = {}    # Staffelfrage bei Serien
-        self._release_lists: dict[str, tuple[float, Candidate, list[dict]]] = {}  # fuer "!grab <Nr>"
+        self._last_title: dict[str, tuple[float, Candidate]] = {}                 # for "!releases" without title
+        self._season_lists: dict[str, tuple[float, Candidate, list[int]]] = {}    # season question for shows
+        self._release_lists: dict[str, tuple[float, Candidate, list[dict]]] = {}  # for "!grab <no.>"
         self._members: tuple[float, frozenset[str]] = (0.0, frozenset())
 
     def start(self) -> None:
         for target, name in ((self._receiver_loop, "signal-receiver"), (self._worker_loop, "request-worker"),
                              (self._check_clients, "arr-check")):
             threading.Thread(target=target, name=name, daemon=True).start()
-        log.info("!request aktiv fuer: %s", ", ".join(c.name for c in self.clients))
+        log.info("!request enabled for: %s", ", ".join(c.name for c in self.clients))
 
     def _check_clients(self) -> None:
         for client in self.clients:
             try:
                 status = _dict(client.call("GET", "/system/status"))
-                log.info("%s erreichbar (Version %s)", client.name, status.get("version", "?"))
+                log.info("%s reachable (version %s)", client.name, status.get("version", "?"))
             except ArrError as exc:
-                log.warning("%s beim Start nicht nutzbar: %s", client.name, exc.user_msg)
+                log.warning("%s not usable at startup: %s", client.name, exc.user_msg)
 
-    # -- Empfang ------------------------------------------------------------ #
+    # -- Receiving ---------------------------------------------------------------- #
     def _receive_url(self) -> str:
         parts = urllib.parse.urlsplit(SIGNAL_API_URL)
         scheme = "wss" if parts.scheme == "https" else "ws"
@@ -1208,15 +1456,15 @@ class RequestService:
             ws = None
             try:
                 ws = WebSocketClient(self._receive_url(), timeout=30)
-                log.info("Signal-Empfang verbunden – warte auf !request")
+                log.info("Signal receiver connected – waiting for !request")
                 backoff = 2
                 while True:
                     raw = ws.recv()
                     if raw is None:
-                        raise ConnectionError("vom Server geschlossen")
+                        raise ConnectionError("closed by the server")
                     self.on_raw_message(raw)
-            except Exception as exc:  # noqa: BLE001 - Empfang muss weiterlaufen
-                log.warning("Signal-Empfang unterbrochen (%s) – neuer Versuch in %d s", exc, backoff)
+            except Exception as exc:  # noqa: BLE001 - receiving must keep running
+                log.warning("Signal receiver interrupted (%s) – retrying in %d s", exc, backoff)
             finally:
                 if ws:
                     ws.close()
@@ -1231,44 +1479,44 @@ class RequestService:
         cmd = self.parse(_dict(data))
         if cmd is None:
             return
-        # Direktnachrichten von Nicht-Mitgliedern schon hier verwerfen: sonst bekaemen Fremde
-        # z. B. die Spam-Bremsen-Antwort und koennten die Befehls-Queue fuellen.
+        # Drop direct messages from non-members right here: otherwise strangers would
+        # e.g. get the spam-brake reply and could fill the command queue.
         if not cmd.in_group and not {i for i in (cmd.number, cmd.uuid) if i} & self._group_members():
-            log.info("Direktnachricht von Nicht-Mitglied ignoriert (%s)", _mask_number(cmd.sender))
+            log.info("Direct message from a non-member ignored (%s)", _mask_number(cmd.sender))
             return
         if not self._throttle(cmd):
             return
         try:
             self._commands.put_nowait(cmd)
         except queue.Full:
-            log.warning("Zu viele offene Anfragen – Befehl verworfen")
+            log.warning("Too many open requests – command dropped")
 
     def parse(self, data: dict) -> Command | None:
-        """Signal-Envelope -> Command (oder None, wenn es kein fuer uns relevanter Befehl ist)."""
+        """Signal envelope -> Command (or None if it is not a command for us)."""
         envelope = _dict(data.get("envelope") or _dict(data.get("params")).get("envelope"))
-        # Formate (mitgeschnitten von signal-cli-rest-api 0.101, json-rpc):
-        #   andere Mitglieder:        envelope.dataMessage
-        #   ... bearbeitet:           envelope.editMessage.dataMessage
-        #   eigenes Konto (Handy):    envelope.syncMessage.sentMessage
-        #   ... bearbeitet:           envelope.syncMessage.sentMessage.editMessage.dataMessage
+        # Formats (captured live from signal-cli-rest-api 0.101, json-rpc):
+        #   other members:            envelope.dataMessage
+        #   ... edited:               envelope.editMessage.dataMessage
+        #   own account (phone):      envelope.syncMessage.sentMessage
+        #   ... edited:               envelope.syncMessage.sentMessage.editMessage.dataMessage
         edit = _dict(envelope.get("editMessage"))
         message = _dict(envelope.get("dataMessage")) or _dict(edit.get("dataMessage"))
         own = False
-        if not message:   # eigene Nachricht von einem anderen Geraet desselben Kontos
+        if not message:   # own message from another device of the same account
             sent = _dict(_dict(envelope.get("syncMessage")).get("sentMessage"))
             edit = _dict(sent.get("editMessage"))
             message = _dict(edit.get("dataMessage")) or sent
             own = bool(message)
-        # Bei Bearbeitungen die urspruengliche Nachricht zitieren (die zeigt Signal an)
+        # For edits, quote the original message (that is what Signal shows)
         quote_ts = _to_int(edit.get("targetSentTimestamp")) or 0
         text = message.get("message")
         if not isinstance(text, str):
             return None
-        # @-Erwaehnungen stehen als Platzhalterzeichen (U+FFFC) im Text, z. B. "@Bot !request ..."
+        # @mentions appear as placeholder characters (U+FFFC) in the text, e.g. "@Bot !request ..."
         text = text.replace("￼", " ").strip()
         first_word = text.split(None, 1)[0].lower() if text else ""
         if first_word not in _COMMANDS:
-            # Antwort per Zitat auf eine Auswahlliste des Bots: einfach "2" statt "!request 2"
+            # Reply (as a quote) to a selection list of the bot: just "2" instead of "!request 2"
             quote = _dict(message.get("quote"))
             quoted_bot = SIGNAL_NUMBER in (quote.get("authorNumber"), quote.get("author"))
             hint = _LIST_HINT.search(str(quote.get("text") or ""))
@@ -1278,7 +1526,7 @@ class RequestService:
 
         timestamp = _to_int(message.get("timestamp") or envelope.get("timestamp")) or 0
         if timestamp and time.time() - timestamp / 1000 > REQUEST_MAX_AGE_SECONDS:
-            log.info("Veralteten Befehl ignoriert")
+            log.info("Outdated command ignored")
             return None
         number = str(envelope.get("sourceNumber") or envelope.get("source") or "")
         uuid = str(envelope.get("sourceUuid") or "")
@@ -1288,44 +1536,43 @@ class RequestService:
         group_id = _dict(message.get("groupInfo")).get("groupId") or _dict(message.get("groupV2")).get("id")
         if group_id:
             if not self.group_id or group_id != self.group_id:
-                return None                                  # andere Gruppe
+                return None                                  # another group
             in_group, reply_to = True, SIGNAL_RECIPIENT
         else:
             if own or not REQUEST_VIA_DM:
-                return None                                  # eigene DMs an Dritte / DMs abgeschaltet
+                return None                                  # own DMs to third parties / DMs disabled
             in_group, reply_to = False, number or uuid
         return Command(text=_clean(text, 300), number=number, uuid=uuid,
-                       name=_plain(_clean(envelope.get("sourceName"), 60)) or "jemand",
+                       name=_plain(_clean(envelope.get("sourceName"), 60)) or t("someone"),
                        timestamp=timestamp, in_group=in_group, reply_to=reply_to,
                        quote_timestamp=quote_ts or timestamp)
 
     def _throttle(self, cmd: Command) -> bool:
         now = time.time()
-        recent = [t for t in self._recent.get(cmd.sender, []) if now - t < 60]
+        recent = [ts for ts in self._recent.get(cmd.sender, []) if now - ts < 60]
         if len(recent) >= COMMANDS_PER_MINUTE:
-            log.warning("Spam-Bremse: Befehl von %s ignoriert", _mask_number(cmd.sender))
-            if now - self._warned.get(cmd.sender, 0) > 60:     # nur einmal pro Minute hinweisen
+            log.warning("Spam brake: command from %s ignored", _mask_number(cmd.sender))
+            if now - self._warned.get(cmd.sender, 0) > 60:     # only notify once per minute
                 self._warned[cmd.sender] = now
-                self._reply(cmd, "🐢 Zu viele Befehle auf einmal – bitte eine Minute warten.")
+                self._reply(cmd, t("slow_down"))
             return False
         recent.append(now)
         self._recent[cmd.sender] = recent
         return True
 
-    # -- Verarbeitung --------------------------------------------------------- #
+    # -- Processing ----------------------------------------------------------------- #
     def _prune(self) -> None:
-        """Abgelaufene Auswahllisten und alte Zaehler wegraeumen (sonst waechst der Speicher langsam mit)."""
+        """Clean up expired selection lists and old counters (otherwise memory slowly grows)."""
         now = time.time()
-        # eine Stunde Gnadenfrist, damit "Liste abgelaufen" noch gemeldet werden kann
+        # one hour of grace, so "list expired" can still be reported
         for store in (self._pending, self._last_title, self._season_lists, self._release_lists):
             for key in [k for k, v in store.items() if v[0] < now - 3600]:
                 del store[key]
-        for store in (self._recent,):
-            for key in [k for k, v in store.items() if not v or now - v[-1] > 60]:
-                del store[key]
+        for key in [k for k, v in self._recent.items() if not v or now - v[-1] > 60]:
+            del self._recent[key]
         for key in [k for k, v in self._adds.items() if not v or now - v[-1][0] > 86400]:
             del self._adds[key]
-        for key in [k for k, t in self._warned.items() if now - t > 60]:
+        for key in [k for k, ts in self._warned.items() if now - ts > 60]:
             del self._warned[key]
 
     def _worker_loop(self) -> None:
@@ -1335,8 +1582,8 @@ class RequestService:
                 self._prune()
                 self.handle(cmd)
             except Exception:  # noqa: BLE001
-                log.exception("Fehler bei der Verarbeitung von %r", cmd.text)
-                self._reply(cmd, "⚠️ Da ist intern etwas schiefgelaufen – bitte später nochmal versuchen.")
+                log.exception("Error while processing %r", cmd.text)
+                self._reply(cmd, t("internal_error"))
 
     def _reply(self, cmd: Command, text: str, poster: Poster | None = None) -> None:
         author = cmd.number or cmd.uuid
@@ -1360,7 +1607,7 @@ class RequestService:
                     data = _dict(json.loads(resp.read(MAX_BODY_BYTES)))
                 members = frozenset(str(m) for m in _list(data.get("members")))
             except Exception as exc:  # noqa: BLE001
-                log.warning("Gruppenmitglieder nicht abrufbar: %s", exc)
+                log.warning("Could not fetch group members: %s", exc)
                 return members
         self._members = (now, members)
         return members
@@ -1371,10 +1618,10 @@ class RequestService:
     def _authorized(self, cmd: Command) -> bool:
         ids = {i for i in (cmd.number, cmd.uuid) if i}
         if REQUEST_ALLOWED_SENDERS and not ids & (REQUEST_ALLOWED_SENDERS | REQUEST_ADMINS):
-            self._reply(cmd, "⛔ Du bist für Anfragen nicht freigeschaltet.")
+            self._reply(cmd, t("not_allowed"))
             return False
         if not cmd.in_group and not ids & self._group_members():
-            log.info("Direktnachricht von Nicht-Mitglied ignoriert (%s)", _mask_number(cmd.sender))
+            log.info("Direct message from a non-member ignored (%s)", _mask_number(cmd.sender))
             return False
         return True
 
@@ -1384,14 +1631,14 @@ class RequestService:
         word, _, args = cmd.text.partition(" ")
         word, args = word.lower(), args.strip()
         if word in ("!help", "!hilfe") or (word == "!request" and not args):
-            self._reply(cmd, USAGE)
+            self._reply(cmd, t("usage"))
         elif word == "!id":
             self._cmd_id(cmd)
         elif word == "!request":
             if args.isdigit() and self._season_choice(cmd, int(args)):
                 return
             if not args.isdigit():
-                self._season_lists.pop(cmd.sender, None)   # neue Suche: alte Staffelfrage gilt nicht mehr
+                self._season_lists.pop(cmd.sender, None)   # new search: the old season question no longer applies
             season = None
             match = _SEASON_SUFFIX.search(" " + args)
             if match:
@@ -1407,27 +1654,27 @@ class RequestService:
             self._cmd_release(cmd, args)
 
     def _cmd_id(self, cmd: Command) -> None:
-        """Eigene Signal-IDs privat schicken – noetig fuer REQUEST_ADMINS/REQUEST_ALLOWED_SENDERS,
-        vor allem bei Leuten, die ihre Telefonnummer in Signal verbergen (dann zaehlt nur die UUID)."""
-        lines = ["🆔 **Deine Signal-IDs** (für REQUEST_ADMINS / REQUEST_ALLOWED_SENDERS):"]
+        """Send your own Signal IDs privately – needed for REQUEST_ADMINS/REQUEST_ALLOWED_SENDERS,
+        especially for people who hide their phone number in Signal (then only the UUID counts)."""
+        lines = [t("id_header")]
         if cmd.number:
-            lines.append(f"Nummer: {cmd.number}")
+            lines.append(t("id_number", value=cmd.number))
         if cmd.uuid:
-            lines.append(f"UUID: {cmd.uuid}")
+            lines.append(t("id_uuid", value=cmd.uuid))
         if cmd.in_group:
-            self._reply(cmd, "📬 Ich habe dir deine ID privat geschickt.")
+            self._reply(cmd, t("id_sent"))
         self.relay.send("\n".join(lines), recipient=cmd.number or cmd.uuid)
 
-    # -- Titel finden ----------------------------------------------------------- #
+    # -- Finding titles -------------------------------------------------------------- #
     def _resolve(self, cmd: Command, args: str, action: str, hint: str = "") -> Candidate | None:
-        """Titel per Listennummer oder Suche bestimmen. Bei mehreren Treffern: Liste senden, None liefern."""
+        """Determine a title by list number or search. Several matches: send a list, return None."""
         if args.isdigit():
             choice = int(args)
             expires, options = self._pending.get(cmd.sender, (0.0, []))
             if 1 <= choice <= len(options):
                 if time.time() > expires:
                     self._pending.pop(cmd.sender, None)
-                    self._reply(cmd, "⌛ Deine Trefferliste ist abgelaufen – bitte nochmal suchen.")
+                    self._reply(cmd, t("list_expired"))
                     return None
                 self._pending.pop(cmd.sender, None)
                 return options[choice - 1]
@@ -1438,11 +1685,11 @@ class RequestService:
             wanted, query = _KIND_WORDS[first.lower()], rest
         query = _clean(query, 100)
         if len(query) < 2:
-            self._reply(cmd, f"❓ Bitte einen Titel angeben, z. B. „{action} Beispielfilm“.")
+            self._reply(cmd, t("title_missing", action=action))
             return None
         clients = [c for c in self.clients if wanted in (None, c.kind)]
         if not clients:
-            self._reply(cmd, f"⚠️ {'Filme' if wanted == 'radarr' else 'Serien'} können hier nicht angefragt werden.")
+            self._reply(cmd, t("cannot_request", kind=t("movies") if wanted == "radarr" else t("shows")))
             return None
 
         title, year = query, None
@@ -1456,17 +1703,18 @@ class RequestService:
             try:
                 items = client.lookup(query)
                 if not items and year:
-                    # z. B. Sonarr findet "Titel 2022" nicht, "Titel" aber schon -> Jahr danach pruefen
+                    # e.g. Sonarr doesn't find "Title 2022" but does find "Title" -> check the year afterwards
                     items = client.lookup(title)
                 candidates += [Candidate(client, item) for item in items[:10]]
             except ArrError as exc:
                 notes.append(exc.user_msg)
         if not candidates:
-            text = "\n".join(notes) if notes else f"🔍 Nichts gefunden für „{_plain(query)}“."
-            if _EPISODE_TAG.search(query) or query.count(".") >= 3:   # sieht aus wie ein Release-Name
-                text += f"\nTipp: Für einen Release-Namen nimm „!release {_plain(query)}“."
+            text = "\n".join(notes) if notes else t("nothing_found", query=_plain(query))
+            if _EPISODE_TAG.search(query) or query.count(".") >= 3:   # looks like a release name
+                text += "\n" + t("tip_release", query=_plain(query))
             self._reply(cmd, text)
             return None
+
         exact = [c for c in candidates if _norm(c.title) == _norm(title) and (year is None or c.year == year)]
         if len(exact) == 1 and not notes:
             return exact[0]
@@ -1478,43 +1726,41 @@ class RequestService:
                 shown.append(cand)
                 counts[cand.client.kind] = counts.get(cand.client.kind, 0) + 1
         self._pending[cmd.sender] = (time.time() + SELECTION_TTL_SECONDS, shown)
-        self._season_lists.pop(cmd.sender, None)      # neue Trefferliste ersetzt eine offene Staffelfrage
-        lines = [f"🔍 **Treffer für „{_plain(query)}“:**"]
-        lines += [f"{i}. {c.label(details=True)}" + (" – schon vorhanden" if c.exists else "")
+        self._season_lists.pop(cmd.sender, None)      # a new result list replaces an open season question
+        lines = [t("results", query=_plain(query))]
+        lines += [f"{i}. {c.label(details=True)}" + (t("already_there") if c.exists else "")
                   for i, c in enumerate(shown, 1)]
-        lines += ["", f"Antworte mit „{action} <Nr>{hint}“ (gilt {SELECTION_TTL_SECONDS // 60} Min.)"]
+        lines += ["", t("reply_with", action=action, hint=hint, minutes=SELECTION_TTL_SECONDS // 60)]
         lines += notes
         self._reply(cmd, "\n".join(lines))
         return None
 
-    # -- Limit (zaehlt pro Titel, Admins unbegrenzt) ---------------------------- #
+    # -- Limit (counted per title, admins unlimited) ------------------------------------ #
     def _limit_reached(self, cmd: Command, key: str) -> bool:
         if REQUEST_LIMIT_PER_DAY <= 0 or self._is_admin(cmd):
             return False
         now = time.time()
-        history = [(t, k) for t, k in self._adds.get(cmd.sender, []) if now - t < 86400]
+        history = [(ts, k) for ts, k in self._adds.get(cmd.sender, []) if now - ts < 86400]
         self._adds[cmd.sender] = history
         keys = {k for _, k in history}
         if key in keys or len(keys) < REQUEST_LIMIT_PER_DAY:
             return False
-        self._reply(cmd, f"⛔ Du hast in den letzten 24 Stunden schon {len(keys)} Titel angefragt "
-                         f"(Limit {REQUEST_LIMIT_PER_DAY}). Bitte später nochmal.")
+        self._reply(cmd, t("limit", count=len(keys), limit=REQUEST_LIMIT_PER_DAY))
         return True
 
     def _count(self, cmd: Command, cand: Candidate) -> None:
         self._adds.setdefault(cmd.sender, []).append((time.time(), cand.key))
         self.relay.note_requester(cand.key, cmd.name)
 
-    # -- !request ---------------------------------------------------------------- #
-    # -- Serien: Staffel waehlen ------------------------------------------------- #
+    # -- Shows: choose seasons ------------------------------------------------------------ #
     def _season_overview(self, cand: Candidate) -> tuple[list[int], dict[int, dict]]:
-        """Staffelnummern (ohne Specials) und – bei vorhandenen Serien – Stand je Staffel."""
+        """Season numbers (without specials) and – for shows in the library – state per season."""
         seasons = cand.item.get("seasons")
         if cand.exists:
             try:
                 seasons = cand.client.series(_to_int(cand.item.get("id")) or 0).get("seasons")
             except ArrError:
-                pass   # dann eben ohne Detailstand
+                pass   # then without details
         info = {}
         for season in _list(seasons):
             season = _dict(season)
@@ -1531,42 +1777,42 @@ class RequestService:
 
     def _ask_season(self, cmd: Command, cand: Candidate, numbers: list[int], info: dict[int, dict]) -> None:
         self._season_lists[cmd.sender] = (time.time() + SELECTION_TTL_SECONDS, cand, numbers)
-        lines = [f"📺 **{cand.label()}** – welche Staffel?", "0. Alle Staffeln"]
+        lines = [t("which_season_q", label=cand.label()), t("all_seasons_item")]
         for n in numbers:
             season = info.get(n, {})
             total = _to_int(_dict(season.get("statistics")).get("totalEpisodeCount"))
-            line = f"{n}. Staffel {n}" + (f" ({total} Folgen)" if total else "")
+            line = t("season_item", n=n) + (t("episodes_count", count=total) if total else "")
             if self._season_complete(season):
-                line += " ✔️ vorhanden"
+                line += t("season_available")
             elif cand.exists and season.get("monitored"):
-                line += " ⏳ angefragt"
+                line += t("season_requested")
             lines.append(line)
-        lines += ["", f"Antworte mit „!request <Nr>“ (gilt {SELECTION_TTL_SECONDS // 60} Min.)"]
+        lines += ["", t("reply_with", action="!request", hint="", minutes=SELECTION_TTL_SECONDS // 60)]
         self._reply(cmd, "\n".join(lines), poster=cand.poster())
 
     def _season_choice(self, cmd: Command, choice: int) -> bool:
-        """'!request <Nr>' nach einer Staffelfrage. False = keine passende Staffelfrage offen."""
+        """'!request <no.>' after a season question. False = no matching season question open."""
         expires, cand, numbers = self._season_lists.get(cmd.sender, (0.0, None, []))
         if cand is None or (choice != 0 and choice not in numbers):
             return False
         self._season_lists.pop(cmd.sender, None)
         if time.time() > expires:
-            self._reply(cmd, "⌛ Die Staffelauswahl ist abgelaufen – bitte nochmal „!request <Titel>“.")
+            self._reply(cmd, t("season_list_expired"))
             return True
         self._add_series(cmd, cand, set(numbers) if choice == 0 else {choice}, numbers)
         return True
 
     def _add_series(self, cmd: Command, cand: Candidate, chosen: set[int], numbers: list[int]) -> None:
         if not chosen or (len(chosen) > 1 and chosen == set(numbers)):
-            what = "alle Staffeln"
+            what = t("what_all")
         elif len(chosen) == 1:
-            what = f"Staffel {next(iter(chosen))}"
+            what = t("what_one", n=next(iter(chosen)))
         else:
-            what = "Staffeln " + ", ".join(map(str, sorted(chosen)))
+            what = t("what_many", numbers=", ".join(map(str, sorted(chosen))))
         if cand.exists:
             _, info = self._season_overview(cand)
             if chosen and all(self._season_complete(info.get(n, {})) for n in chosen):
-                self._reply(cmd, f"{cand.label()} – {what} ist schon vollständig da 🍿")
+                self._reply(cmd, t("season_complete", label=cand.label(), what=what))
                 return
             if self._limit_reached(cmd, cand.key):
                 return
@@ -1579,53 +1825,51 @@ class RequestService:
             if self._limit_reached(cmd, cand.key):
                 return
             try:
-                # keine Staffeln bekannt (z. B. noch nicht angelaufen) -> Voreinstellung SONARR_MONITOR
+                # no seasons known (e.g. not started yet) -> default SONARR_MONITOR
                 cand.item = dict(cand.item, **cand.client.add(cand.item, search=True, seasons=chosen or None))
             except ArrError as exc:
                 if exc.already_exists:
-                    self._reply(cmd, f"{cand.label()} ist schon in {cand.client.name} vorhanden 📚")
+                    self._reply(cmd, t("already_in_arr", label=cand.label(), arr=cand.client.name))
                 else:
                     self._reply(cmd, exc.user_msg)
                 return
         self._count(cmd, cand)
-        log.info("Angefragt von %s: %s (%s) -> Sonarr", _mask_number(cmd.sender), cand.label(), what)
-        where = "hier" if cmd.in_group else "in der Gruppe"
-        upcoming = ("\n📅 Die Serie ist noch nicht gestartet – Folgen werden geladen, sobald sie erscheinen."
-                    if str(cand.item.get("status") or "").lower() == "upcoming" else "")
-        self._reply(cmd, f"✅ **Angefragt:** {cand.label()} – {what}\n"
-                         f"Sonarr sucht jetzt passend zum Qualitätsprofil – neue Folgen werden {where} angekündigt."
-                         f"{upcoming}", poster=cand.poster())
+        log.info("Requested by %s: %s (%s) -> Sonarr", _mask_number(cmd.sender), cand.label(), what)
+        upcoming = t("upcoming") if str(cand.item.get("status") or "").lower() == "upcoming" else ""
+        self._reply(cmd, t("series_requested", label=cand.label(), what=what, upcoming=upcoming,
+                           where=t("here") if cmd.in_group else t("in_group")), poster=cand.poster())
 
+    # -- !request -------------------------------------------------------------------------- #
     def _add(self, cmd: Command, cand: Candidate, season: int | None = None) -> None:
         self._last_title[cmd.sender] = (time.time() + 3600, cand)
         if not cand.is_movie:
             numbers, info = self._season_overview(cand)
             if season is not None:
                 if season not in numbers:
-                    known = ", ".join(map(str, numbers)) or "keine"
-                    self._reply(cmd, f"❓ Staffel {season} gibt es bei {cand.label()} nicht. Verfügbar: {known}.")
+                    known = ", ".join(map(str, numbers)) or t("none")
+                    self._reply(cmd, t("no_such_season", label=cand.label(), season=season, known=known))
                     return
                 self._add_series(cmd, cand, {season}, numbers)
             elif len(numbers) > 1:
                 self._ask_season(cmd, cand, numbers, info)
             else:
-                self._add_series(cmd, cand, set(numbers), numbers)   # nur eine Staffel -> keine Rueckfrage
+                self._add_series(cmd, cand, set(numbers), numbers)   # only one season -> no question
             return
-        where = "hier" if cmd.in_group else "in der Gruppe"
+        where = t("here") if cmd.in_group else t("in_group")
         if cand.exists:
-            # Die Suche liefert hasFile/monitored bei vorhandenen Filmen nicht zuverlaessig -> direkt fragen
+            # The search doesn't report hasFile/monitored reliably for existing movies -> ask directly
             try:
                 movie = cand.client.movie(_to_int(cand.item.get("id")) or 0)
             except ArrError as exc:
                 self._reply(cmd, exc.user_msg)
                 return
             if movie.get("hasFile"):
-                self._reply(cmd, f"{cand.label()} ist schon verfügbar 🍿")
+                self._reply(cmd, t("movie_available", label=cand.label()))
                 return
             if movie.get("monitored"):
-                self._reply(cmd, f"{cand.label()} ist schon angefragt und wird gesucht ⏳{_release_hint(movie)}")
+                self._reply(cmd, t("movie_searching", label=cand.label(), hint=_release_hint(movie)))
                 return
-            # vorhanden, aber nicht ueberwacht -> Radarr wuerde ihn nie suchen: wieder aktivieren
+            # in Radarr but unmonitored -> Radarr would never search it: activate again
             if self._limit_reached(cmd, cand.key):
                 return
             try:
@@ -1634,10 +1878,9 @@ class RequestService:
                 self._reply(cmd, exc.user_msg)
                 return
             self._count(cmd, cand)
-            log.info("Wieder ueberwacht von %s: %s", _mask_number(cmd.sender), cand.label())
-            self._reply(cmd, f"✅ **Angefragt:** {cand.label()}\nWar in Radarr, wurde aber nicht gesucht – "
-                             f"jetzt wieder aktiv. Sobald es da ist, wird es {where} angekündigt."
-                             f"{_release_hint(movie)}", poster=cand.poster())
+            log.info("Monitored again by %s: %s", _mask_number(cmd.sender), cand.label())
+            self._reply(cmd, t("movie_remonitored", label=cand.label(), where=where, hint=_release_hint(movie)),
+                        poster=cand.poster())
             return
         if self._limit_reached(cmd, cand.key):
             return
@@ -1645,20 +1888,17 @@ class RequestService:
             cand.item = dict(cand.item, **cand.client.add(cand.item))
         except ArrError as exc:
             if exc.already_exists:
-                self._reply(cmd, f"{cand.label()} ist schon in {cand.client.name} vorhanden 📚")
+                self._reply(cmd, t("already_in_arr", label=cand.label(), arr=cand.client.name))
             else:
                 self._reply(cmd, exc.user_msg)
             return
         self._count(cmd, cand)
-        log.info("Angefragt von %s: %s -> %s", _mask_number(cmd.sender), cand.label(), cand.client.name)
-        self._reply(cmd, f"✅ **Angefragt:** {cand.label()}\n"
-                         f"{cand.client.name} sucht jetzt danach – sobald es da ist, wird es {where} angekündigt."
-                         f"{_release_hint(cand.item)}\n"
-                         f"Lieber ein bestimmtes Release? → „!releases“",
-                    poster=cand.poster())
+        log.info("Requested by %s: %s -> %s", _mask_number(cmd.sender), cand.label(), cand.client.name)
+        self._reply(cmd, t("movie_requested", label=cand.label(), arr=cand.client.name, where=where,
+                           hint=_release_hint(cand.item)), poster=cand.poster())
 
     def _ensure_in_library(self, cmd: Command, cand: Candidate) -> Candidate | None:
-        """Fuer die Release-Auswahl muss der Titel in Radarr/Sonarr sein – sonst ohne Auto-Suche hinzufuegen."""
+        """For release selection the title must be in Radarr/Sonarr – otherwise add it without auto search."""
         if cand.exists:
             return cand
         if self._limit_reached(cmd, cand.key):
@@ -1669,11 +1909,11 @@ class RequestService:
             self._reply(cmd, exc.user_msg)
             return None
         self._count(cmd, cand)
-        log.info("Ohne Auto-Suche hinzugefuegt von %s: %s", _mask_number(cmd.sender), cand.label())
-        self._reply(cmd, f"➕ {cand.label()} wurde zu {cand.client.name} hinzugefügt (ohne automatische Suche).")
+        log.info("Added without auto search by %s: %s", _mask_number(cmd.sender), cand.label())
+        self._reply(cmd, t("added_no_search", label=cand.label(), arr=cand.client.name))
         return cand
 
-    # -- !releases --------------------------------------------------------------- #
+    # -- !releases ------------------------------------------------------------------------- #
     def _cmd_releases(self, cmd: Command, args: str) -> None:
         season = None
         match = _SEASON_SUFFIX.search(" " + args)
@@ -1685,7 +1925,7 @@ class RequestService:
         else:
             expires, cand = self._last_title.get(cmd.sender, (0.0, None))
             if not cand or time.time() > expires:
-                self._reply(cmd, "❓ Für welchen Titel? Z. B. „!releases Beispielfilm 2021“ oder „!releases Beispielserie s2“.")
+                self._reply(cmd, t("which_title"))
                 return
         if not cand:
             return
@@ -1693,8 +1933,8 @@ class RequestService:
         if not cand.is_movie and season is None:
             seasons = sorted(n for n in (_to_int(_dict(s).get("seasonNumber")) for s in _list(cand.item.get("seasons")))
                              if n)
-            known = f" Verfügbar: {', '.join(map(str, seasons))}." if seasons else ""
-            self._reply(cmd, f"❓ Welche Staffel von {cand.label()}? Z. B. „!releases s1“.{known}")
+            known = t("available_seasons", numbers=", ".join(map(str, seasons))) if seasons else ""
+            self._reply(cmd, t("which_season", label=cand.label(), known=known))
             return
         cand = self._ensure_in_library(cmd, cand)
         if cand:
@@ -1702,11 +1942,11 @@ class RequestService:
 
     def _search_releases(self, cmd: Command, cand: Candidate, season: int | None,
                          episode_id: int | None = None) -> list[dict] | None:
-        what = cand.label() + (f" – Staffel {season}" if season is not None and not episode_id else "")
-        self._reply(cmd, f"🔎 Suche Releases für {what} bei den Indexern … (kann bis zu einer Minute dauern)")
+        what = cand.label() + (t("season_suffix", n=season) if season is not None and not episode_id else "")
+        self._reply(cmd, t("searching_releases", what=what))
         item_id = _to_int(cand.item.get("id"))
         if not item_id:
-            self._reply(cmd, f"⚠️ {cand.label()} ist in {cand.client.name} nicht auffindbar.")
+            self._reply(cmd, t("not_found_in_arr", label=cand.label(), arr=cand.client.name))
             return None
         try:
             return cand.client.releases(item_id, season, episode_id)
@@ -1722,42 +1962,42 @@ class RequestService:
         visible = [r for r in releases if admin or r.get("approved")]
         if not visible:
             hidden = len(releases) - len(visible)
-            extra = f" ({hidden} passen nicht zum Qualitätsprofil – die darf nur ein Admin holen)" if hidden else ""
-            self._reply(cmd, f"📭 Keine passenden Releases für {cand.label()} gefunden{extra}.")
+            extra = t("no_releases_hidden", count=hidden) if hidden else ""
+            self._reply(cmd, t("no_releases", label=cand.label(), extra=extra))
             return
         shown = visible[:max(RELEASES_SHOWN, 1)]
         self._release_lists[cmd.sender] = (time.time() + SELECTION_TTL_SECONDS, cand, shown)
-        lines = [f"📦 **Releases für {cand.label()}**" + (f" – Staffel {season}" if season is not None else "") + ":"]
+        season_txt = t("season_suffix", n=season) if season is not None else ""
+        lines = [t("releases_header", label=cand.label(), season=season_txt)]
         lines += [_release_lines(i, r) for i, r in enumerate(shown, 1)]
         more = len(visible) - len(shown)
-        lines += ["", f"Antworte mit „!grab <Nr>“ (gilt {SELECTION_TTL_SECONDS // 60} Min.)"
-                  + (f" · {more} weitere nicht angezeigt" if more > 0 else "")]
+        lines += ["", t("grab_hint", minutes=SELECTION_TTL_SECONDS // 60)
+                  + (t("more_not_shown", count=more) if more > 0 else "")]
         self._reply(cmd, "\n".join(lines))
 
-    # -- !grab ------------------------------------------------------------------- #
+    # -- !grab -------------------------------------------------------------------------- #
     def _cmd_grab(self, cmd: Command, args: str) -> None:
         if not args.isdigit():
-            self._reply(cmd, "❓ Nutzung: „!grab <Nr>“ – die Nummer aus deiner letzten „!releases“-Liste.")
+            self._reply(cmd, t("grab_usage"))
             return
         expires, cand, releases = self._release_lists.get(cmd.sender, (0.0, None, []))
         choice = int(args)
         if not releases:
-            self._reply(cmd, "❓ Du hast keine offene Release-Liste – erst „!releases <Titel>“.")
+            self._reply(cmd, t("no_release_list"))
             return
         if time.time() > expires:
             self._release_lists.pop(cmd.sender, None)
-            self._reply(cmd, "⌛ Deine Release-Liste ist abgelaufen – bitte „!releases“ nochmal ausführen.")
+            self._reply(cmd, t("release_list_expired"))
             return
         if not 1 <= choice <= len(releases):
-            self._reply(cmd, f"❓ Bitte eine Nummer von 1 bis {len(releases)} wählen.")
+            self._reply(cmd, t("pick_range", count=len(releases)))
             return
         self._grab(cmd, cand, releases[choice - 1])
 
     def _grab(self, cmd: Command, cand: Candidate, release: dict) -> bool:
         title = _plain(_clean(release.get("title"), 120))
         if not release.get("approved") and not self._is_admin(cmd):
-            self._reply(cmd, f"⛔ „{title}“ passt nicht zum Qualitätsprofil ({_plain(_rejection(release))}). "
-                             f"Das darf nur ein Admin laden.")
+            self._reply(cmd, t("admin_only", title=title, reason=_plain(_rejection(release))))
             return False
         if self._limit_reached(cmd, cand.key):
             return False
@@ -1765,29 +2005,26 @@ class RequestService:
             cand.client.grab(release)
         except ArrError as exc:
             if exc.status == 404:
-                self._reply(cmd, "⌛ Das Release ist nicht mehr im Zwischenspeicher von "
-                                 f"{cand.client.name} – bitte „!releases“ nochmal ausführen.")
+                self._reply(cmd, t("not_in_cache", arr=cand.client.name))
             else:
                 self._reply(cmd, exc.user_msg)
             return False
         self._count(cmd, cand)
         self._release_lists.pop(cmd.sender, None)
-        log.info("Release geladen von %s: %s (%s)", _mask_number(cmd.sender), title, cand.label())
-        where = "hier" if cmd.in_group else "in der Gruppe"
-        override = "" if release.get("approved") else "\n⚠️ Admin-Override: passt eigentlich nicht zum Profil."
-        self._reply(cmd, f"⬇️ **Wird geladen:** {title}\nfür {cand.label()} – sobald es fertig ist, "
-                         f"wird es {where} angekündigt.{override}")
+        log.info("Release grabbed by %s: %s (%s)", _mask_number(cmd.sender), title, cand.label())
+        override = "" if release.get("approved") else t("admin_override")
+        self._reply(cmd, t("downloading", title=title, label=cand.label(), override=override,
+                           where=t("here") if cmd.in_group else t("in_group")))
         return True
 
-    # -- !release <Release-Name> ------------------------------------------------- #
+    # -- !release <release name> --------------------------------------------------------- #
     def _cmd_release(self, cmd: Command, args: str) -> None:
         name = _clean_release_name(args)
         if len(name) < 5:
-            self._reply(cmd, "❓ Nutzung: „!release <exakter Release-Name>“, "
-                             "z. B. „!release Beispielfilm.2024.2160p.WEB-DL.DDP5.1-GROUP“.")
+            self._reply(cmd, t("release_usage"))
             return
-        # Serien-Release erkennbar an S01 / S01E02 – sonst zuerst als Film versuchen. Versteht Radarr den
-        # Namen nicht (kein Jahr), probieren wir Sonarr (z. B. Serien-Packs ohne Staffel-Tag).
+        # Show releases are recognisable by S01 / S01E02 – otherwise try as a movie first. If Radarr
+        # doesn't understand the name (no year), try Sonarr (e.g. show packs without a season tag).
         order = ("sonarr", "radarr") if _EPISODE_TAG.search(name) else ("radarr", "sonarr")
         parsed, client, kind = {}, None, ""
         for candidate_kind in order:
@@ -1807,7 +2044,7 @@ class RequestService:
             if usable:
                 break
         if client is None:
-            self._reply(cmd, "⚠️ Filme/Serien können hier nicht angefragt werden.")
+            self._reply(cmd, t("cannot_request_media"))
             return
         info = _dict(parsed.get("parsedMovieInfo") if kind == "radarr" else parsed.get("parsedEpisodeInfo"))
         known = _dict(parsed.get("movie") if kind == "radarr" else parsed.get("series"))
@@ -1816,8 +2053,7 @@ class RequestService:
         if kind == "sonarr":
             season = _to_int(info.get("seasonNumber"))
             if season is None:
-                self._reply(cmd, "❓ Im Release-Namen fehlt die Staffel (z. B. S02). Bei Anime mit durchgehender "
-                                 "Folgennummer bitte „!releases <Titel> s<Staffel>“ nutzen.")
+                self._reply(cmd, t("season_missing_in_name"))
                 return
             numbers = _list(info.get("episodeNumbers"))
             if not info.get("fullSeason") and numbers:
@@ -1833,7 +2069,7 @@ class RequestService:
             else:
                 title, year = _clean(info.get("seriesTitle"), 100), None
             if not title:
-                self._reply(cmd, "❓ Den Release-Namen konnte ich nicht lesen – stimmt die Schreibweise?")
+                self._reply(cmd, t("cannot_read_name"))
                 return
             try:
                 candidates = self._release_candidates(client, title, year)
@@ -1841,11 +2077,11 @@ class RequestService:
                 self._reply(cmd, exc.user_msg)
                 return
             if not candidates:
-                self._reply(cmd, f"🔍 Zu „{_plain(title)}“{f' ({year})' if year else ''} finde ich in {client.name} "
-                                 f"keinen Film/keine Serie.")
+                self._reply(cmd, t("no_title_for", title=_plain(title), year=f" ({year})" if year else "",
+                                   arr=client.name))
                 return
 
-        self._reply(cmd, f"🔎 Suche „{_plain(name)}“ bei den Indexern … (kann etwas dauern)")
+        self._reply(cmd, t("searching_release", name=_plain(name)))
         tried: list[str] = []
         for cand in candidates:
             added_now = False
@@ -1868,40 +2104,41 @@ class RequestService:
                 return
             target = _norm(name)
             titles = [(_norm(str(r.get("title", ""))), r) for r in releases]
-            release = next((r for t, r in titles if t == target), None)
+            release = next((r for norm_title, r in titles if norm_title == target), None)
             if release is None:
-                # Manche Indexer haengen etwas an ("-xpost", "[eztv]") -> eindeutiger Praefix-Treffer zaehlt
-                prefixed = [r for t, r in titles if t.startswith(target) and len(t) - len(target) <= 15]
+                # Some indexers append something ("-xpost", "[eztv]") -> a unique prefix match counts
+                prefixed = [r for norm_title, r in titles
+                            if norm_title.startswith(target) and len(norm_title) - len(target) <= 15]
                 release = prefixed[0] if len(prefixed) == 1 else None
             if release is not None:
                 self._last_title[cmd.sender] = (time.time() + 3600, cand)
                 if added_now:
-                    log.info("Fuer !release ohne Auto-Suche hinzugefuegt: %s", cand.label())
+                    log.info("Added for !release without auto search: %s", cand.label())
                 if not self._grab(cmd, cand, release):
                     self._rollback(cand, added_now)
                 return
-            # Nicht exakt da, aber sehr aehnliche Releases (Tippfehler, andere Gruppe/Qualitaet)?
-            # Dann ist es mit hoher Wahrscheinlichkeit der richtige Titel -> Auswahl anbieten.
-            scored = sorted(((difflib.SequenceMatcher(None, target, t).ratio(), r) for t, r in titles),
-                            key=lambda pair: pair[0], reverse=True)
+            # Not exactly there, but very similar releases (typo, other group/quality)?
+            # Then it is very likely the right title -> offer a selection.
+            scored = sorted(((difflib.SequenceMatcher(None, target, norm_title).ratio(), r)
+                             for norm_title, r in titles), key=lambda pair: pair[0], reverse=True)
             close = [r for score, r in scored if score >= 0.8 and (self._is_admin(cmd) or r.get("approved"))][:5]
             if close:
                 self._last_title[cmd.sender] = (time.time() + 3600, cand)
                 self._release_lists[cmd.sender] = (time.time() + SELECTION_TTL_SECONDS, cand, close)
-                lines = [f"🔍 „{_plain(name)}“ gibt es so nicht – ähnliche Releases für {cand.label()}:"]
+                lines = [t("similar_releases", name=_plain(name), label=cand.label())]
                 lines += [_release_lines(i, r) for i, r in enumerate(close, 1)]
-                lines += ["", f"Antworte mit „!grab <Nr>“ (gilt {SELECTION_TTL_SECONDS // 60} Min.)"]
+                lines += ["", t("grab_hint", minutes=SELECTION_TTL_SECONDS // 60)]
                 self._reply(cmd, "\n".join(lines))
                 return
             tried.append(cand.label())
-            self._rollback(cand, added_now)   # falscher Titel -> wieder raus, naechsten Kandidaten pruefen
+            self._rollback(cand, added_now)   # wrong title -> remove again, try the next candidate
 
-        checked = f" (geprüft: {', '.join(tried)})" if tried else ""
-        self._reply(cmd, f"🔍 „{_plain(name)}“ haben die Indexer nicht (mehr){checked}.")
+        checked = t("checked", titles=", ".join(tried)) if tried else ""
+        self._reply(cmd, t("release_not_found", name=_plain(name), checked=checked))
 
     def _release_candidates(self, client: ArrClient, title: str, year: int | None) -> list[Candidate]:
-        """Moegliche Titel zu einem Release-Namen: mit/ohne Jahr, mit wiederhergestellten Umlauten.
-        Die eigentliche Pruefung passiert danach: nur wenn es GENAU dieses Release gibt, wird geladen."""
+        """Possible titles for a release name: with/without year, with umlauts restored.
+        The real check happens afterwards: only if EXACTLY this release exists, it is downloaded."""
         terms: list[str] = []
         for variant in (title, _with_umlauts(title)):
             for term in ((f"{variant} {year}",) if year else ()) + (variant,):
@@ -1919,20 +2156,20 @@ class RequestService:
             title_match = any(_fold(n) == _fold(title) for n in names if n)
             return (0 if title_match else 1, 0 if year is None or cand.year == year else 1)
 
-        return sorted(hits, key=rank)[:3]   # sorted() ist stabil: sonst gilt die Reihenfolge der Suche
+        return sorted(hits, key=rank)[:3]   # sorted() is stable: otherwise the search order applies
 
     def _rollback(self, cand: Candidate, added_now: bool) -> None:
         if not added_now:
             return
         try:
             cand.client.remove(_to_int(cand.item.get("id")) or 0)
-            log.info("Wieder entfernt (Release nicht gefunden): %s", cand.label())
+            log.info("Removed again (release not found): %s", cand.label())
         except ArrError as exc:
-            log.warning("Konnte %s nicht wieder entfernen: %s", cand.label(), exc.user_msg)
+            log.warning("Could not remove %s again: %s", cand.label(), exc.user_msg)
 
     @staticmethod
     def _episode_id(client: ArrClient, name: str, season: int, number: int | None) -> int | None:
-        """Episoden-ID fuer eine Einzelfolge; bei frisch hinzugefuegten Serien kurz auf Sonarr warten."""
+        """Episode ID for a single episode; for freshly added shows wait briefly for Sonarr."""
         for _ in range(6):
             try:
                 episodes = _list(client.parse(name).get("episodes"))
@@ -1947,31 +2184,31 @@ class RequestService:
 
 
 # --------------------------------------------------------------------------- #
-# HTTP-Server
+# HTTP server
 # --------------------------------------------------------------------------- #
 
 
-def _parse_body(raw: bytes, content_type: str = "") -> dict:  # noqa: ARG001 - Header nur fuers Log relevant
-    """JSON – oder Formulardaten. Jellyfins Webhook-Plugin hat zwei fast gleich benannte Ziele:
-    "Generic" schickt JSON, "Generic Form" schickt key=value&... (auch wenn der Header JSON behauptet)."""
+def _parse_body(raw: bytes, content_type: str = "") -> dict:  # noqa: ARG001 - header only matters for the log
+    """JSON – or form data. Jellyfin's webhook plugin has two almost identically named destinations:
+    "Generic" sends JSON, "Generic Form" sends key=value&... (even if the header claims JSON)."""
     text = raw.decode("utf-8").lstrip("﻿ \t\r\n")
-    # Am Inhalt entscheiden, nicht am Header – "Generic Form" behauptet ggf. application/json.
+    # Decide by content, not by header – "Generic Form" may claim application/json.
     if text.startswith(("{", "[")):
         data = json.loads(text)
     else:
         fields = urllib.parse.parse_qs(text, keep_blank_values=True, strict_parsing=True)
         data = {key: values[-1] for key, values in fields.items()}
     if not isinstance(data, dict) or not data:
-        raise ValueError("JSON-Objekt oder Formulardaten erwartet")
+        raise ValueError("expected a JSON object or form data")
     return data
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "SignalMediaRelay"
     sys_version = ""
-    timeout = REQUEST_TIMEOUT_SECONDS  # Socket-Timeout gegen haengende/langsame Clients
+    timeout = REQUEST_TIMEOUT_SECONDS  # socket timeout against hanging/slow clients
 
-    def log_message(self, fmt, *args):  # Standard-Accesslog nur im Debug, Token geschwaerzt
+    def log_message(self, fmt, *args):  # access log only at DEBUG, token redacted
         log.debug("%s - %s", self.address_string(), _redact(fmt % args))
 
     def _reply(self, code: int, body: dict) -> None:
@@ -1991,7 +2228,7 @@ class Handler(BaseHTTPRequestHandler):
         if auth.lower().startswith("basic "):
             try:
                 decoded = base64.b64decode(auth[6:].strip(), validate=True).decode("utf-8")
-                tokens.append(decoded.partition(":")[2])  # Passwort-Teil
+                tokens.append(decoded.partition(":")[2])  # password part
             except (binascii.Error, UnicodeDecodeError):
                 pass
         tokens.extend(query.get("token") or [])
@@ -2001,7 +2238,7 @@ class Handler(BaseHTTPRequestHandler):
         if not RELAY_TOKEN:
             return ALLOW_INSECURE_NO_TOKEN
         expected = RELAY_TOKEN.encode()
-        return any(hmac.compare_digest(t.encode(), expected) for t in self._supplied_tokens(query))
+        return any(hmac.compare_digest(tok.encode(), expected) for tok in self._supplied_tokens(query))
 
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path.rstrip("/")
@@ -2018,7 +2255,7 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(404, {"error": "not found"})
             return
         if not self._authorized(urllib.parse.parse_qs(parts.query)):
-            log.warning("Abgelehnt (falsches Token) von %s auf %s", self.address_string(), path)
+            log.warning("Rejected (wrong token) from %s on %s", self.address_string(), path)
             self._reply(401, {"error": "unauthorized"})
             return
 
@@ -2030,8 +2267,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = _parse_body(raw, self.headers.get("Content-Type") or "")
         except (ValueError, UnicodeDecodeError) as exc:
-            # Anfang des Inhalts mitloggen (bereinigt/gekuerzt) – z. B. kaputtes Jellyfin-Template erkennen
-            log.warning("Ungueltiges JSON auf %s (%s, Content-Type %r): %s", path, exc,
+            # log the start of the body (cleaned/shortened) – e.g. to spot a broken Jellyfin template
+            log.warning("Invalid body on %s (%s, Content-Type %r): %s", path, exc,
                         self.headers.get("Content-Type"), _clean(raw[:200].decode("utf-8", "replace"), 200))
             self._reply(400, {"error": "invalid json"})
             return
@@ -2040,7 +2277,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = handler(data)
         except Exception:  # noqa: BLE001
-            log.exception("Fehler beim Verarbeiten von %s", path)
+            log.exception("Error while processing %s", path)
             self._reply(500, {"error": "internal error"})
             return
         log.debug("%s -> %s", path, result)
@@ -2053,35 +2290,37 @@ _SONARR_MONITOR_TYPES = {"all", "future", "missing", "existing", "firstSeason", 
 
 
 def validate_config() -> list[str]:
-    """Tippfehler in der Konfiguration beim Start melden statt erst bei der ersten Anfrage im Chat."""
+    """Report configuration typos at startup instead of at the first request in the chat."""
     problems = []
     if not re.fullmatch(r"\+\d{6,15}", SIGNAL_NUMBER or ""):
-        problems.append("SIGNAL_NUMBER muss im Format +491701234567 sein")
+        problems.append("SIGNAL_NUMBER must look like +491701234567")
     if not (SIGNAL_RECIPIENT.startswith("group.") and _internal_group_id(SIGNAL_RECIPIENT)) \
             and not re.fullmatch(r"\+\d{6,15}", SIGNAL_RECIPIENT):
-        problems.append("SIGNAL_RECIPIENT muss eine gültige Gruppen-ID (group.…) oder Telefonnummer sein")
+        problems.append("SIGNAL_RECIPIENT must be a valid group ID (group.…) or phone number")
     for name, url in (("SIGNAL_API_URL", SIGNAL_API_URL), ("JELLYFIN_URL", JELLYFIN_URL),
                       ("RADARR_URL", RADARR_URL), ("SONARR_URL", SONARR_URL)):
         if url and urllib.parse.urlsplit(url).scheme not in ("http", "https"):
-            problems.append(f"{name} muss mit http:// oder https:// beginnen")
+            problems.append(f"{name} must start with http:// or https://")
+    if BOT_LANGUAGE not in MESSAGES:
+        problems.append(f"BOT_LANGUAGE must be one of {sorted(MESSAGES)}")
     if LOG_LEVEL not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
-        problems.append("LOG_LEVEL muss DEBUG, INFO, WARNING oder ERROR sein")
+        problems.append("LOG_LEVEL must be DEBUG, INFO, WARNING or ERROR")
     for name, value, low, high in (("LISTEN_PORT", LISTEN_PORT, 1, 65535),
                                    ("AGGREGATE_SECONDS", AGGREGATE_SECONDS, 0, 3600),
                                    ("RELEASES_SHOWN", RELEASES_SHOWN, 1, 20),
                                    ("RELEASE_SEARCH_TIMEOUT", RELEASE_SEARCH_TIMEOUT, 10, 900),
                                    ("REQUEST_COMMANDS_PER_MINUTE", COMMANDS_PER_MINUTE, 1, 60)):
         if not low <= value <= high:
-            problems.append(f"{name} muss zwischen {low} und {high} liegen (ist {value})")
+            problems.append(f"{name} must be between {low} and {high} (is {value})")
     if REQUESTS_ENABLED:
         if RADARR_MINIMUM_AVAILABILITY not in _RADARR_AVAILABILITY:
-            problems.append(f"RADARR_MINIMUM_AVAILABILITY muss eins von {sorted(_RADARR_AVAILABILITY)} sein")
+            problems.append(f"RADARR_MINIMUM_AVAILABILITY must be one of {sorted(_RADARR_AVAILABILITY)}")
         if SONARR_MONITOR not in _SONARR_MONITOR_TYPES:
-            problems.append(f"SONARR_MONITOR muss eins von {sorted(_SONARR_MONITOR_TYPES)} sein")
+            problems.append(f"SONARR_MONITOR must be one of {sorted(_SONARR_MONITOR_TYPES)}")
         if (RADARR_URL and not RADARR_API_KEY) or (RADARR_API_KEY and not RADARR_URL):
-            problems.append("RADARR_URL und RADARR_API_KEY nur zusammen setzen")
+            problems.append("set RADARR_URL and RADARR_API_KEY together")
         if (SONARR_URL and not SONARR_API_KEY) or (SONARR_API_KEY and not SONARR_URL):
-            problems.append("SONARR_URL und SONARR_API_KEY nur zusammen setzen")
+            problems.append("set SONARR_URL and SONARR_API_KEY together")
     return problems
 
 
@@ -2089,45 +2328,43 @@ def main() -> None:
     global RELAY
     missing = [n for n, v in (("SIGNAL_NUMBER", SIGNAL_NUMBER), ("SIGNAL_RECIPIENT", SIGNAL_RECIPIENT)) if not v]
     if missing:
-        sys.exit(f"Konfigurationsfehler: fehlende Variablen: {', '.join(missing)}")
+        sys.exit(f"Configuration error: missing variables: {', '.join(missing)}")
     problems = validate_config()
     if problems:
-        sys.exit("Konfigurationsfehler:\n  - " + "\n  - ".join(problems))
+        sys.exit("Configuration error:\n  - " + "\n  - ".join(problems))
     if not RELAY_TOKEN:
         if not ALLOW_INSECURE_NO_TOKEN:
-            sys.exit("Konfigurationsfehler: RELAY_TOKEN fehlt "
-                     "(zum bewussten Abschalten: ALLOW_INSECURE_NO_TOKEN=true)")
-        log.warning("RELAY_TOKEN ist leer – Webhooks werden ohne Authentifizierung angenommen!")
+            sys.exit("Configuration error: RELAY_TOKEN is missing "
+                     "(to deliberately disable it: ALLOW_INSECURE_NO_TOKEN=true)")
+        log.warning("RELAY_TOKEN is empty – webhooks are accepted without authentication!")
     elif RELAY_TOKEN in ("change-me", "changeme") or len(RELAY_TOKEN) < 16:
-        sys.exit("Konfigurationsfehler: RELAY_TOKEN ist zu schwach (mind. 16 Zeichen, nicht 'change-me')")
+        sys.exit("Configuration error: RELAY_TOKEN is too weak (at least 16 characters, not 'change-me')")
 
-    def _on_sigterm(*_):  # Docker stoppt per SIGTERM -> sauber herunterfahren
+    def _on_sigterm(*_):  # Docker stops via SIGTERM -> shut down cleanly
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_sigterm)
 
     if REQUESTS_ENABLED:
         if not ((RADARR_URL and RADARR_API_KEY) or (SONARR_URL and SONARR_API_KEY)):
-            sys.exit("Konfigurationsfehler: REQUESTS_ENABLED=true, aber weder RADARR_URL+RADARR_API_KEY "
-                     "noch SONARR_URL+SONARR_API_KEY gesetzt")
-        for name, url in (("RADARR_URL", RADARR_URL), ("SONARR_URL", SONARR_URL)):
-            if url and urllib.parse.urlsplit(url).scheme not in ("http", "https"):
-                sys.exit(f"Konfigurationsfehler: {name} muss mit http:// oder https:// beginnen")
+            sys.exit("Configuration error: REQUESTS_ENABLED=true, but neither RADARR_URL+RADARR_API_KEY "
+                     "nor SONARR_URL+SONARR_API_KEY is set")
         if not SIGNAL_RECIPIENT.startswith("group.") and not REQUEST_ALLOWED_SENDERS:
-            log.warning("SIGNAL_RECIPIENT ist keine Gruppe – !request wird nur per Direktnachricht vom Empfaenger angenommen")
+            log.warning("SIGNAL_RECIPIENT is not a group – !request is only accepted via direct message "
+                        "from the recipient")
 
     RELAY = Relay()
     if REQUESTS_ENABLED:
         RequestService(RELAY).start()
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
-    log.info("Signal Media Relay %s lauscht auf %s:%d -> %s (Empfaenger %s)",
-             __version__, LISTEN_HOST, LISTEN_PORT, SIGNAL_API_URL, _mask_number(SIGNAL_RECIPIENT))
+    log.info("Signal Media Relay %s listening on %s:%d -> %s (recipient %s, language %s)",
+             __version__, LISTEN_HOST, LISTEN_PORT, SIGNAL_API_URL, _mask_number(SIGNAL_RECIPIENT), BOT_LANGUAGE)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        log.info("Beende – sende ausstehende Ankuendigungen …")
+        log.info("Shutting down – sending pending announcements …")
         RELAY.flush_all()
         RELAY.wait_until_sent(timeout=20)
         server.server_close()

@@ -91,7 +91,10 @@ def main() -> int:
     for token, label in (("", "missing"), ("change-me", "placeholder"), ("short", "too short")):
         p = subprocess.run([sys.executable, RELAY], env=dict(env, RELAY_TOKEN=token),
                            capture_output=True, text=True, timeout=15)
-        check(f"refuses to start with {label} token", p.returncode != 0 and "Konfigurationsfehler" in p.stderr)
+        check(f"refuses to start with {label} token", p.returncode != 0 and "Configuration error" in p.stderr)
+    p = subprocess.run([sys.executable, RELAY], env=dict(env, RELAY_TOKEN=TOKEN, BOT_LANGUAGE="fr"),
+                       capture_output=True, text=True, timeout=15)
+    check("refuses to start with an unknown BOT_LANGUAGE", p.returncode != 0 and "BOT_LANGUAGE" in p.stderr)
 
     # 2) Start the relay for real (DEBUG log goes to a temp file)
     log_path = os.path.join(tempfile.gettempdir(), "signal-media-relay-test.log")
@@ -142,26 +145,26 @@ def main() -> int:
         post("/jellyfin", {"NotificationType": "ItemAdded", "ItemType": "Movie", "Name": "Traversal",
                            "Year": "2006", "ItemId": "../../System/Info?x="}, auth)
         post("/jellyfin", {"NotificationType": "ItemAdded", "ItemType": "Episode", "Name": "Pilot",
-                           "SeriesName": "Katz &amp; Maus", "SeasonNumber": "1", "EpisodeNumber": "1",
+                           "SeriesName": "Cat &amp; Mouse", "SeasonNumber": "1", "EpisodeNumber": "1",
                            "SeriesId": JELLYFIN_ID}, auth)
         # 5) Episode bundling + de-duplication: 3 episodes -> 1 message, repeat is dropped
         for ep in (1, 2, 3, 2):
             post("/sonarr", {"eventType": "Download", "series": {"title": "Bundle Show"},
                              "episodes": [{"seasonNumber": 1, "episodeNumber": ep, "title": f"Ep {ep}"}]}, auth)
         post("/radarr", movie("FileUrl", 2001, ""), auth)   # same movie again -> dropped
-        # 6) Edge cases (0.8.0)
-        # Jellyfin "Generic Form": Formulardaten, aber Header behauptet application/json
-        form_code = post("/jellyfin", b"NotificationType=ItemAdded&ItemType=Movie&ItemId=&Name=Formular%20Film"
+        # 6) edge cases (0.8.0)
+        # Jellyfin "Generic Form": form data, but the header claims application/json
+        form_code = post("/jellyfin", b"NotificationType=ItemAdded&ItemType=Movie&ItemId=&Name=Form%20Movie"
                                       b"&Year=2021&SeriesName=&SeriesId=&SeasonNumber=&EpisodeNumber=", auth)
         form_ep = post("/jellyfin", b"NotificationType=ItemAdded&ItemType=Episode&ItemId=&Name=Pilot"
-                                    b"&Year=&SeriesName=Formular%20%26amp%3B%20Serie&SeriesId=&SeasonNumber=2"
+                                    b"&Year=&SeriesName=Form%20%26amp%3B%20Show&SeriesId=&SeasonNumber=2"
                                     b"&EpisodeNumber=5", auth)
-        post("/radarr", movie("Stern*chen ~Spezial~ `x` ||y||", 2010, ""), auth)   # Signal-Formatierung
-        post("/radarr", movie("東京物語", 2020, ""), auth)                          # nicht-lateinische Titel
-        post("/radarr", movie("七人の侍", 2020, ""), auth)                          # gleiches Jahr, anderer Titel
-        many = [post("/sonarr", {"eventType": "Download", "series": {"title": f"Serie {n}"},
+        post("/radarr", movie("St*ar ~Special~ `x` ||y||", 2010, ""), auth)   # Signal formatting markers
+        post("/radarr", movie("東京物語", 2020, ""), auth)                          # non-Latin titles
+        post("/radarr", movie("七人の侍", 2020, ""), auth)                          # same year, different title
+        many = [post("/sonarr", {"eventType": "Download", "series": {"title": f"Show {n}"},
                                  "episodes": [{"seasonNumber": 1, "episodeNumber": 1, "title": "Pilot"}]}, auth)
-                for n in range(70)]                                              # grosser Import
+                for n in range(70)]                                              # large import
 
         expected = 3 + 7 + 1 + 2 + 3 + 70   # 3 test pings, 7 announcements above, 1 bundled episode message
         deadline = time.time() + 30
@@ -192,27 +195,59 @@ def main() -> int:
     check("newline + bidi chars stripped from title",
           bool(good and "Good Injected Line" in good["message"] and "‮" not in good["message"]))
     check("Jellyfin path-traversal ID not used", not any("System" in p for p in paths))
-    tom = message("Katz")
-    check("Jellyfin HTML entities decoded", bool(tom and "Katz & Maus" in tom["message"]))
+    tom = message("Cat")
+    check("Jellyfin HTML entities decoded", bool(tom and "Cat & Mouse" in tom["message"]))
     jf = [h for p, h in fetched if p.startswith(f"/Items/{JELLYFIN_ID}")]
     check("Jellyfin poster fetched with API key", bool(jf and jf[0].get("X-Emby-Token") == "jfkey"))
     bundle = [m for m in sent_to_signal if "Bundle Show" in m["message"]]
-    check("3 episodes bundled into 1 message", len(bundle) == 1 and "3 neue Folgen" in bundle[0]["message"])
+    check("3 episodes bundled into 1 message", len(bundle) == 1 and "3 new episodes" in bundle[0]["message"])
     check("duplicate movie not announced twice", sum("FileUrl" in m["message"] for m in sent_to_signal) == 1)
     check("all messages go to the configured group", all(m["recipients"] == [GROUP] for m in sent_to_signal))
     check("token never written to the log", TOKEN not in log_text)
-    star = message("Stern")
+    star = message("St")
     check("formatting markers in titles are neutralised (no broken bold/strike/spoiler)",
-          bool(star and "Stern∗chen ∼Spezial∼ ˋxˋ ∣∣y∣∣" in star["message"]))
+          bool(star and "St∗ar ∼Special∼ ˋxˋ ∣∣y∣∣" in star["message"]))
     check("two different non-Latin titles of the same year are both announced (no false duplicate)",
           bool(message("東京物語") and message("七人の侍")))
-    form_movie, form_show = message("Formular Film"), message("Formular & Serie")
+    form_movie, form_show = message("Form Movie"), message("Form & Show")
     check("Jellyfin 'Generic Form' (form data, wrong JSON header) -> movie and episode announced",
           form_code == 200 and form_ep == 200 and bool(form_movie and "(2021)" in form_movie["message"])
           and bool(form_show and "S02E05 – Pilot" in form_show["message"]))
     check("70 different shows at once -> all accepted and announced (single flusher thread)",
           all(code == 200 for code in many)
-          and sum(1 for m in sent_to_signal if re.search(r":\*\* Serie \d+ – ", m["message"])) == 70)
+          and sum(1 for m in sent_to_signal if re.search(r":\*\* Show \d+ – ", m["message"])) == 70)
+    check("default bot language is English", bool(message("New movie") and not message("Neuer Film")))
+
+    # 7) BOT_LANGUAGE=de: same relay, German texts
+    de_port = free_port()
+    before = len(sent_to_signal)
+    de_relay = subprocess.Popen([sys.executable, RELAY], env=dict(env, RELAY_TOKEN=TOKEN, BOT_LANGUAGE="de",
+                                                                 LISTEN_PORT=str(de_port)),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{de_port}/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        for path, payload in (("/radarr", {"eventType": "Download", "movie": {"title": "Deutsch Test", "year": 2001},
+                                           "movieFile": {"quality": "WEBDL-1080p"}}),
+                              ("/sonarr", {"eventType": "Download", "series": {"title": "Deutsch Serie"},
+                                           "episodes": [{"seasonNumber": 3, "episodeNumber": 1}]})):
+            urllib.request.urlopen(urllib.request.Request(
+                f"http://127.0.0.1:{de_port}{path}", data=json.dumps(payload).encode(), method="POST",
+                headers={"Content-Type": "application/json", "X-Relay-Token": TOKEN}), timeout=10).read()
+        deadline = time.time() + 15
+        while len(sent_to_signal) < before + 2 and time.time() < deadline:
+            time.sleep(0.2)
+    finally:
+        de_relay.terminate()
+        de_relay.wait(15)
+    german = [m["message"] for m in sent_to_signal[before:]]
+    check("BOT_LANGUAGE=de -> German announcements",
+          any("🎬 **Neuer Film:** Deutsch Test (2001)" in m and "Qualität: WEBDL-1080p" in m for m in german)
+          and any("**Neue Folge:** Deutsch Serie – Staffel 3" in m for m in german))
 
     print(f"\n{len(sent_to_signal)} messages sent to fake Signal, {len(failures)} failed checks")
     server.shutdown()

@@ -1,6 +1,6 @@
 # Signal Media Relay
 
-**Version 0.8.0** · see [CHANGELOG](CHANGELOG.md)
+**Version 0.9.0** · see [CHANGELOG](CHANGELOG.md)
 
 Posts new movies and episodes from **Sonarr/Radarr** (or **Jellyfin**) into a **Signal group**.
 
@@ -9,15 +9,16 @@ Sonarr / Radarr / Jellyfin ──webhook──▶ relay :8090 ──▶ signal-c
 ```
 
 ```
-🎬 Neuer Film: Beispielfilm (2024)            📺 3 neue Folgen: Beispielserie – Staffel 2
-Qualität: Bluray-1080p                         S02E01 – Folge Eins
-Eine kurze Beschreibung …          [poster]   S02E02 – Folge Zwei …             [poster]
+🎬 New movie: Example Movie (2024)            📺 3 new episodes: Example Show – Season 2
+Quality: Bluray-1080p                         S02E01 – Episode One
+A short description …             [poster]   S02E02 – Episode Two …            [poster]
 ```
 
 - Single Python file, standard library only. No `pip install` needed.
 - Bundles a season's episodes into one message and never posts the same item twice within 24 h.
 - Skips quality upgrades by default and attaches posters.
 - Hardened: token auth, SSRF-safe poster downloads, non-root read-only container.
+- Bot messages in English or German (`BOT_LANGUAGE=en|de`).
 
 ## Install
 
@@ -56,6 +57,7 @@ Copy the `"id"` value (starts with `group.`) into `docker-compose.yml`:
       SIGNAL_NUMBER: "+491701234567"
       SIGNAL_RECIPIENT: "group.xxxxxxxx"
       RELAY_TOKEN: "<token from step 1>"
+      BOT_LANGUAGE: "en"                # or "de"
 ```
 
 > Signal has no broadcast channels. To make the group behave like one, set **Group settings → Send messages → Only admins**.
@@ -64,7 +66,7 @@ Copy the `"id"` value (starts with `group.`) into `docker-compose.yml`:
 
 ```bash
 docker compose up -d --build
-docker compose logs -f relay        # should say "Signal Media Relay lauscht auf 0.0.0.0:8090"
+docker compose logs -f relay        # should say "Signal Media Relay 0.9.0 listening on 0.0.0.0:8090"
 ```
 
 ### 5. Connect a source
@@ -99,32 +101,32 @@ Use **one** source per library. If you use both, duplicate protection catches mo
 Group members can request a movie or a show directly from Signal:
 
 ```
-Anna:  !request Beispielfilm
-Bot:   🔍 Treffer für „Beispielfilm“:
-       1. 🎬 Beispielfilm (2021)
-       2. 🎬 Beispielfilm (1984)
-       3. 📺 Beispielserie: Ursprung (2024) – 1 Staffel
-       Antworte mit „!request <Nr>“ (gilt 10 Min.)
+Anna:  !request Example Movie
+Bot:   🔍 Results for “Example Movie”:
+       1. 🎬 Example Movie (2021)
+       2. 🎬 Example Movie (1984)
+       3. 📺 Example Show: Origins (2024) – 1 season
+       Reply with “!request <no.>” (valid for 10 min)
 Anna:  !request 1
-Bot:   ✅ Angefragt: 🎬 Beispielfilm (2021)
-       Radarr sucht jetzt danach – sobald es da ist, wird es hier angekündigt.
+Bot:   ✅ Requested: 🎬 Example Movie (2021)
+       Radarr is searching for it now – it will be announced here once it's there.
  …later
-Bot:   🎬 Neuer Film: Beispielfilm (2021) · 🙋 Angefragt von Anna
+Bot:   🎬 New movie: Example Movie (2021) · 🙋 Requested by Anna
 ```
 
 | Command | What it does |
 |---|---|
 | `!request <title>` | Searches Radarr and Sonarr. A single exact match is used right away; otherwise you get a numbered list. **Movies** are added and downloaded according to the quality profile. For **shows**, the bot asks which season (`0` = all) and Sonarr downloads according to the quality profile. |
-| `!request <title> s<season>` | Show with the season given directly, e.g. `!request Beispielserie s2`. Skips the question. |
-| `!request <title> <year>` | Narrows down the search, e.g. `!request Beispielfilm 2021` |
-| `!request film <title>` / `!request serie <title>` | Searches movies only / shows only |
+| `!request <title> s<season>` | Show with the season given directly, e.g. `!request Example Show s2`. Skips the question. |
+| `!request <title> <year>` | Narrows down the search, e.g. `!request Example Movie 2021` |
+| `!request movie <title>` / `!request show <title>` | Searches movies only / shows only (German: `film`/`serie`) |
 | `!request <number>` | Picks an entry from your last list |
-| `!releases <title>` | Lists the indexer releases, like *Interactive Search* in Radarr/Sonarr. For shows add the season: `!releases Beispielserie s2` |
+| `!releases <title>` | Lists the indexer releases, like *Interactive Search* in Radarr/Sonarr. For shows add the season: `!releases Example Show s2` |
 | `!releases` | The same list for the title you picked last |
 | `!grab <number>` | Downloads that release from your last `!releases` list |
-| `!release <release name>` | Downloads exactly this release, e.g. `!release Beispielfilm.2024.2160p.WEB-DL.DDP5.1-GROUP`. No `!request` needed first: the bot works out the title from the name, adds it if needed and grabs it. German release names work too (`Gruene.Wiese…` is found as *Grüne Wiese* or under its original title). Single episodes (`…S02E05…`) and season packs (`…S02…`) work. |
+| `!release <release name>` | Downloads exactly this release, e.g. `!release Example.Movie.2024.2160p.WEB-DL.DDP5.1-GROUP`. No `!request` needed first: the bot works out the title from the name, adds it if needed and grabs it. German release names work too (`Gruene.Wiese…` is found as *Grüne Wiese* or under its original title). Single episodes (`…S02E05…`) and season packs (`…S02…`) work. |
 | `!id` | Sends you your Signal number/UUID privately, for `REQUEST_ADMINS` / `REQUEST_ALLOWED_SENDERS`. People who hide their number in Signal can only be listed by UUID. |
-| `!request` / `!hilfe` | Shows the help |
+| `!request` / `!help` / `!hilfe` | Shows the help |
 
 Also handy:
 - **Lists:** you can reply to a bot list with just the number, as a quote (`2` instead of `!request 2`).
@@ -136,19 +138,19 @@ Also handy:
 - Numbers in `REQUEST_ADMINS` also see rejected releases, with the reason, and can download them. Admins have no daily limit.
 - If the title isn't in the library yet, `!releases`/`!release` first add it **without** automatic search, so only the chosen release is downloaded.
 - How `!release` finds the title: it searches with the name from the release, also with umlauts restored (`ue` → `ü`). It then checks up to 3 matches to see whether the indexers offer **exactly this release** for that title. A match the bot added for this check and that turns out to be wrong is removed again (no files, no exclusion list).
-- The daily limit counts **titles**: `!request Beispielfilm` followed by `!grab` for Beispielfilm uses one request.
+- The daily limit counts **titles**: `!request Example Movie` followed by `!grab` for Example Movie uses one request.
 
 For shows it looks like this:
 
 ```
-Ben:  !request Beispielserie
-Bot:  📺 Beispielserie (2022) – welche Staffel?
-      0. Alle Staffeln
-      1. Staffel 1 (9 Folgen) ✔️ vorhanden
-      2. Staffel 2 (10 Folgen)
+Ben:  !request Example Show
+Bot:  📺 Example Show (2022) – which season?
+      0. All seasons
+      1. Season 1 (9 episodes) ✔️ available
+      2. Season 2 (10 episodes)
 Ben:  !request 2
-Bot:  ✅ Angefragt: 📺 Beispielserie (2022) – Staffel 2
-      Sonarr sucht jetzt passend zum Qualitätsprofil …
+Bot:  ✅ Requested: 📺 Example Show (2022) – season 2
+      Sonarr is now searching according to the quality profile …
 ```
 
 - **New show:** only the chosen seasons are monitored and searched.
@@ -167,7 +169,7 @@ The bot replies to each request with a quote. It reports success and every kind 
 **Setup:**
 1. In `docker-compose.yml`, set `REQUESTS_ENABLED: "true"`, plus `RADARR_URL`/`RADARR_API_KEY` and/or `SONARR_URL`/`SONARR_API_KEY`. The API key is under *Settings → General → Security*. Optionally pin the quality profile and root folder.
 2. The relay container must be able to reach Radarr/Sonarr: same Docker network (`http://radarr:7878`) or a LAN IP.
-3. Run `docker compose up -d`. The log should show `Radarr erreichbar (Version …)` and `Signal-Empfang verbunden`.
+3. Run `docker compose up -d`. The log should show `Radarr reachable (version …)` and `Signal receiver connected`.
 
 **Who can request:**
 - Anyone who writes in the group.
@@ -187,7 +189,7 @@ The bot replies to each request with a quote. It reports success and every kind 
 ## Unraid
 
 1. **Image:** `homelabbergod/signal-media-relay` on Docker Hub. To build and push a new version:
-   `docker build -t homelabbergod/signal-media-relay:0.8.0 -t homelabbergod/signal-media-relay:latest . && docker push --all-tags homelabbergod/signal-media-relay`
+   `docker build -t homelabbergod/signal-media-relay:0.9.0 -t homelabbergod/signal-media-relay:latest . && docker push --all-tags homelabbergod/signal-media-relay`
 2. **Template:** copy [`unraid/my-signal-media-relay.xml`](unraid/my-signal-media-relay.xml) to `/boot/config/plugins/dockerMan/templates-user/`. Then go to *Docker → Add Container → Template* and pick `signal-media-relay`. All variables are listed there with descriptions, secrets are masked, and the hardening options are preset as *Extra Parameters*.
 3. **Signal API:** `bbernhard/signal-cli-rest-api` with `MODE=json-rpc`, available from Community Apps or via *Add Container*. Map `/home/.local/share/signal-cli` to `/mnt/user/appdata/signal-cli-rest-api`.
 4. **Network (with gluetun):** put the relay and the Signal API into the **custom Docker network that gluetun is in**. Radarr/Sonarr stay inside gluetun's network stack (`--net=container:gluetun`).
@@ -209,6 +211,7 @@ Changes take effect with `docker compose up -d`. A plain `restart` keeps the old
 | `SIGNAL_NUMBER` | – | Bot's number (required) |
 | `SIGNAL_RECIPIENT` | – | `group.…` ID or a phone number (required) |
 | `RELAY_TOKEN` | – | Webhook secret, ≥ 16 chars (required) |
+| `BOT_LANGUAGE` | `en` | Language of the bot messages: `en` or `de` |
 | `AGGREGATE_SECONDS` | `60` | How long to collect episodes of a season before posting |
 | `DEDUPE_HOURS` | `24` | Don't repost the same item within this window (`0` = off) |
 | `ANNOUNCE_UPGRADES` | `false` | Also post quality upgrades |
@@ -251,12 +254,12 @@ Both tests run the relay against fake Signal and Radarr/Sonarr servers. They nee
 
 | Symptom | Fix |
 |---|---|
-| Relay exits with `Konfigurationsfehler` | Required variable missing, or the token is weak |
-| Still `Konfigurationsfehler` after changing `docker-compose.yml` | The environment is only applied when the container is **created**: run `docker compose up -d` (not `restart`) |
+| Relay exits with `Configuration error` | Required variable missing, or the token is weak |
+| Still `Configuration error` after changing `docker-compose.yml` | The environment is only applied when the container is **created**: run `docker compose up -d` (not `restart`) |
 | `401` in Sonarr/Radarr | Password ≠ `RELAY_TOKEN` |
-| `Signal-API Fehler 400` in the log | Wrong `SIGNAL_NUMBER` or `SIGNAL_RECIPIENT` |
-| `!request` gets no answer | Log must show `Signal-Empfang verbunden`; `signal-api` must run with `MODE=json-rpc` |
-| Bot answers "nicht richtig eingerichtet" | Quality profile or root folder not found. The log lists the available ones |
+| `Signal API error 400` in the log | Wrong `SIGNAL_NUMBER` or `SIGNAL_RECIPIENT` |
+| `!request` gets no answer | Log must show `Signal receiver connected`; `signal-api` must run with `MODE=json-rpc` |
+| Bot answers "not set up correctly" | Quality profile or root folder not found. The log lists the available ones |
 | Group missing in `/v1/groups/…` | Wait a minute after linking, or run `docker compose restart signal-api` |
 
 ## License

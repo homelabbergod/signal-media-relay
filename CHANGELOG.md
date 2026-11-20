@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0
+
+### Changed
+- **The whole project is now in English:** code, comments, log messages, README, Unraid template and tests.
+- **Bot messages are configurable with `BOT_LANGUAGE=en|de`.** The default is **English**. To keep the German messages from 0.8.0, set `BOT_LANGUAGE=de`.
+- English command aliases: `!help`, `!request movie|show <title>`, `… season 2`. The German forms (`!hilfe`, `film`/`serie`, `staffel 2`) keep working.
+
+### Fixed
+- Your own edited messages (sent from the bot's account) are now processed. The format was captured live from signal-cli-rest-api.
+- Jellyfin "Generic Form" webhooks (form data instead of JSON) are accepted.
+
 ## 0.8.0 – first release
 
 ### Features
