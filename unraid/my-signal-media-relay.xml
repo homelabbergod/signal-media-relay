@@ -7,7 +7,7 @@
 -->
 <Container version="2">
   <Name>signal-media-relay</Name>
-  <Repository>homelabbergod/signal-media-relay:0.9.1</Repository>
+  <Repository>homelabbergod/signal-media-relay:0.9.2</Repository>
   <Registry>https://hub.docker.com/r/homelabbergod/signal-media-relay</Registry>
   <Network>signal-net</Network>
   <MyIP/>
@@ -33,7 +33,7 @@
 
   <!-- ===== Signal ===== -->
   <Config Name="Signal API URL" Target="SIGNAL_API_URL" Default="http://signal-api:8080" Mode="" Description="URL of signal-cli-rest-api. In the same Docker network: http://&lt;container name&gt;:8080" Type="Variable" Display="always" Required="true" Mask="false">http://signal-api:8080</Config>
-  <Config Name="Signal number (bot)" Target="SIGNAL_NUMBER" Default="" Mode="" Description="Phone number of the bot account, e.g. +491701234567" Type="Variable" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="Signal number (bot)" Target="SIGNAL_NUMBER" Default="" Mode="" Description="Phone number of the bot account, e.g. +4900000000000" Type="Variable" Display="always" Required="true" Mask="false"></Config>
   <Config Name="Recipient (group ID)" Target="SIGNAL_RECIPIENT" Default="" Mode="" Description="Group ID (starts with group., see GET /v1/groups/&lt;number&gt;) or a phone number" Type="Variable" Display="always" Required="true" Mask="false"></Config>
   <Config Name="Bot language" Target="BOT_LANGUAGE" Default="en" Mode="" Description="Language of the bot messages in Signal: en or de" Type="Variable" Display="always" Required="false" Mask="false">en</Config>
 
@@ -43,7 +43,10 @@
   <!-- ===== Announcements ===== -->
   <Config Name="Post test events" Target="ANNOUNCE_TESTS" Default="false" Mode="" Description="Post the Test button in Sonarr/Radarr/Jellyfin as a message into the group (true/false)" Type="Variable" Display="always" Required="false" Mask="false">false</Config>
   <Config Name="Announce upgrades" Target="ANNOUNCE_UPGRADES" Default="false" Mode="" Description="Also announce quality upgrades (true/false)" Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
-  <Config Name="Episode bundling (s)" Target="AGGREGATE_SECONDS" Default="60" Mode="" Description="Collect episodes of a season this long and post them as one message" Type="Variable" Display="advanced" Required="false" Mask="false">60</Config>
+  <Config Name="Quiet time (s)" Target="AGGREGATE_SECONDS" Default="60" Mode="" Description="Post a show/movie only after this many seconds without a new episode of it" Type="Variable" Display="advanced" Required="false" Mask="false">60</Config>
+  <Config Name="Wait for the download queue" Target="ANNOUNCE_WAIT_FOR_QUEUE" Default="true" Mode="" Description="Announce a show/movie only when Sonarr/Radarr has nothing left for it in the download queue – one message per show instead of several (needs Radarr/Sonarr URL + API key)" Type="Variable" Display="always" Required="false" Mask="false">true</Config>
+  <Config Name="Max. wait for the queue (s)" Target="ANNOUNCE_MAX_WAIT_SECONDS" Default="21600" Mode="" Description="Announce anyway after this many seconds, even if something is still downloading (21600 = 6 h)" Type="Variable" Display="advanced" Required="false" Mask="false">21600</Config>
+  <Config Name="Queue re-check (s)" Target="QUEUE_RECHECK_SECONDS" Default="120" Mode="" Description="How often to ask Sonarr/Radarr again while waiting" Type="Variable" Display="advanced" Required="false" Mask="false">120</Config>
   <Config Name="Duplicate protection (h)" Target="DEDUPE_HOURS" Default="24" Mode="" Description="Don't post the same title twice within this time (0 = off)" Type="Variable" Display="advanced" Required="false" Mask="false">24</Config>
   <Config Name="Max. episodes per message" Target="MAX_EPISODES_LISTED" Default="10" Mode="" Description="This many episodes are listed individually" Type="Variable" Display="advanced" Required="false" Mask="false">10</Config>
   <Config Name="Max. description length" Target="OVERVIEW_MAX_CHARS" Default="350" Mode="" Description="Movie descriptions are shortened after this" Type="Variable" Display="advanced" Required="false" Mask="false">350</Config>

@@ -2,7 +2,7 @@
 FROM python:3.14-slim-trixie
 
 # Must match __version__ in relay.py
-ARG VERSION=0.9.1
+ARG VERSION=0.9.2
 LABEL org.opencontainers.image.title="signal-media-relay" \
       org.opencontainers.image.description="Announces new movies/episodes from Sonarr, Radarr or Jellyfin in a Signal group; !request from the chat" \
       org.opencontainers.image.version="${VERSION}" \

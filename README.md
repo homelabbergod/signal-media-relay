@@ -1,6 +1,6 @@
 # Signal Media Relay
 
-**Version 0.9.1** · [Changelog](CHANGELOG.md) · Docker image: [`homelabbergod/signal-media-relay`](https://hub.docker.com/r/homelabbergod/signal-media-relay)
+**Version 0.9.2** · [Changelog](CHANGELOG.md) · Docker image: [`homelabbergod/signal-media-relay`](https://hub.docker.com/r/homelabbergod/signal-media-relay)
 
 Announces new movies and episodes from **Sonarr/Radarr** (or **Jellyfin**) in a **Signal group**. Group members can request movies and shows right from the chat.
 
@@ -10,7 +10,7 @@ Quality: Bluray-1080p                         S02E01 – Episode One
 🙋 Requested by Anna             [poster]     S02E02 – Episode Two …            [poster]
 ```
 
-- One message per season instead of one per episode, with posters and no duplicates.
+- One message per show instead of one per episode: it waits until Sonarr/Radarr finished downloading that show or movie. Posters included, no duplicates.
 - `!request <title>` in the chat adds movies and shows to Radarr/Sonarr. You can also pick a specific release.
 - Bot messages in English or German (`BOT_LANGUAGE=en|de`).
 - A single Python file with no dependencies, running in a hardened container (non-root, read-only).
@@ -32,7 +32,7 @@ docker compose up -d signal-api
 2. **Create a group** with the bot in it. Then open `http://localhost:8080/v1/groups/<bot-number>` and copy the `"id"` (`group.…`).
 3. **Configure** the `environment:` block in `docker-compose.yml`. Every option is commented there. At least set:
    ```yaml
-   SIGNAL_NUMBER: "+491701234567"
+   SIGNAL_NUMBER: "+4900000000000"
    SIGNAL_RECIPIENT: "group.…"
    RELAY_TOKEN: "…"        # python -c "import secrets;print(secrets.token_urlsafe(24))"
    BOT_LANGUAGE: "en"      # or "de"
@@ -123,6 +123,7 @@ All options are commented in [`docker-compose.yml`](docker-compose.yml) and in t
 | `SIGNAL_NUMBER`, `SIGNAL_RECIPIENT`, `RELAY_TOKEN` | – | Required (see quick start) |
 | `BOT_LANGUAGE` | `en` | `en` or `de` |
 | `ANNOUNCE_TESTS` | `false` | Post the *Test* button of Sonarr/Radarr into the group |
+| `ANNOUNCE_WAIT_FOR_QUEUE` | `true` | Announce a show/movie only when Sonarr/Radarr has nothing left for it in the download queue (needs `SONARR_URL`/`RADARR_URL` + API key; max. `ANNOUNCE_MAX_WAIT_SECONDS`, default 6 h) |
 | `REQUESTS_ENABLED` | `false` | Turn on chat requests |
 | `REQUEST_LIMIT_PER_DAY` | `5` | Titles per person per 24 h (`0` = unlimited) |
 | `REQUEST_ADMINS` | – | Numbers/UUIDs (from `!id`) with extra rights |

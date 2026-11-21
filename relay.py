@@ -27,7 +27,7 @@ Python standard library only, no dependencies.
 
 from __future__ import annotations
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 
 import base64
 import binascii
@@ -86,7 +86,11 @@ RELAY_TOKEN = _env("RELAY_TOKEN", "")
 LISTEN_HOST = _env("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = _env_int("LISTEN_PORT", 8090)
 BOT_LANGUAGE = (_env("BOT_LANGUAGE", "en") or "en").lower()
-AGGREGATE_SECONDS = _env_int("AGGREGATE_SECONDS", 60)
+AGGREGATE_SECONDS = _env_int("AGGREGATE_SECONDS", 60)        # quiet time: post after N s without a new episode
+# Announce a show/movie only when Sonarr/Radarr has nothing left for it in the download queue
+ANNOUNCE_WAIT_FOR_QUEUE = _env_bool("ANNOUNCE_WAIT_FOR_QUEUE", True)
+ANNOUNCE_MAX_WAIT_SECONDS = _env_int("ANNOUNCE_MAX_WAIT_SECONDS", 6 * 3600)   # post anyway after this long
+QUEUE_RECHECK_SECONDS = _env_int("QUEUE_RECHECK_SECONDS", 120)              # how often to ask the queue again
 DEDUPE_HOURS = _env_int("DEDUPE_HOURS", 24)
 MAX_EPISODES_LISTED = _env_int("MAX_EPISODES_LISTED", 10)
 OVERVIEW_MAX_CHARS = _env_int("OVERVIEW_MAX_CHARS", 350)
@@ -167,6 +171,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "new_episode": "New episode",
         "new_episodes": "{count} new episodes",
         "season": "Season {n}",
+        "seasons_list": "Seasons {numbers}",
         "specials": "Specials",
         "more_episodes": "… and {count} more",
         "test_ok": "✅ Connection test from {source} successful.",
@@ -289,6 +294,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "new_episode": "Neue Folge",
         "new_episodes": "{count} neue Folgen",
         "season": "Staffel {n}",
+        "seasons_list": "Staffeln {numbers}",
         "specials": "Specials",
         "more_episodes": "… und {count} weitere",
         "test_ok": "✅ Verbindungstest von {source} erfolgreich.",
@@ -437,15 +443,33 @@ class OutgoingMessage:
 
 @dataclass
 class EpisodeGroup:
+    """All new episodes of ONE show (across seasons) until it is announced."""
     series: str
     year: str
-    season: int
     source: str
-    episodes: dict[int, str] = field(default_factory=dict)
+    episodes: dict[tuple[int, int], str] = field(default_factory=dict)   # (season, episode) -> title
     qualities: set[str] = field(default_factory=set)
     poster: Poster | None = None
     requester: str = ""
-    due: float = 0.0                 # when the collected episodes get posted
+    due: float = 0.0                 # earliest time to post (moves on with every new episode)
+    first_seen: float = 0.0          # for ANNOUNCE_MAX_WAIT_SECONDS
+    arr_id: int | None = None        # Sonarr series ID (for the queue check); None = no check (e.g. Jellyfin)
+    postponed: bool = False
+
+
+@dataclass
+class PendingMovie:
+    title: str
+    year: str
+    overview: str
+    quality: str
+    poster: Poster | None
+    source: str
+    requester: str = ""
+    due: float = 0.0
+    first_seen: float = 0.0
+    arr_id: int | None = None        # Radarr movie ID (for the queue check)
+    postponed: bool = False
 
 
 USER_AGENT = f"signal-media-relay/{__version__}"
@@ -606,9 +630,12 @@ def send_signal(msg: OutgoingMessage) -> None:
 
 
 class Relay:
-    def __init__(self) -> None:
+    def __init__(self, queue_check=None) -> None:
+        """queue_check(kind, arr_id) -> True while Sonarr/Radarr still downloads/imports something
+        for that show/movie. None = no Sonarr/Radarr configured -> only the quiet time applies."""
+        self._queue_check = queue_check if ANNOUNCE_WAIT_FOR_QUEUE else None
         self._lock = threading.Lock()
-        self._pending: dict[str, EpisodeGroup] = {}
+        self._pending: dict[str, EpisodeGroup | PendingMovie] = {}
         self._seen: dict[str, float] = {}
         self._requested: dict[str, tuple[str, float]] = {}   # "movie:<tmdbId>"/"series:<tvdbId>" -> (name, time)
         self._outbox: "queue.Queue[OutgoingMessage]" = queue.Queue(maxsize=MAX_OUTBOX)
@@ -626,18 +653,42 @@ class Relay:
     def _flusher_loop(self) -> None:
         while True:
             time.sleep(1)
-            try:   # this thread must never die – otherwise episode bundles are never posted
+            try:   # this thread must never die – otherwise announcements are never posted
                 now = time.time()
                 with self._lock:
-                    due = [k for k, g in self._pending.items() if g.due <= now]
+                    due = [k for k, item in self._pending.items() if item.due <= now]
                 for key in due:
-                    self._flush(key)
+                    self._try_flush(key)
             except Exception:  # noqa: BLE001
-                log.exception("Error in the episode flusher – continuing")
+                log.exception("Error in the announcement flusher – continuing")
+
+    def _try_flush(self, key: str) -> None:
+        """Post a due item – unless Sonarr/Radarr is still downloading/importing for it."""
+        with self._lock:
+            item = self._pending.get(key)
+        if item is None:
+            return
+        name = item.series if isinstance(item, EpisodeGroup) else item.title
+        waited = time.time() - item.first_seen
+        if self._queue_check and item.arr_id:
+            if waited >= ANNOUNCE_MAX_WAIT_SECONDS:
+                log.warning("Still downloading after %d min – announcing anyway: %s", waited // 60, name)
+            elif self._queue_check("sonarr" if isinstance(item, EpisodeGroup) else "radarr", item.arr_id):
+                with self._lock:
+                    item.due = time.time() + QUEUE_RECHECK_SECONDS
+                (log.debug if item.postponed else log.info)(
+                    "Still downloading/importing – announcement postponed: %s", name)
+                item.postponed = True
+                return
+        self._flush(key)
 
     @property
     def retry_count(self) -> int:
         return len(self._retry)
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
 
     def _enqueue(self, msg: OutgoingMessage) -> None:
         try:
@@ -686,64 +737,83 @@ class Relay:
 
     # -- Movies -------------------------------------------------------------------- #
     def add_movie(self, *, title: str, year: str, overview: str, quality: str,
-                  poster: Poster | None, source: str, requester_key: str = "") -> None:
+                  poster: Poster | None, source: str, requester_key: str = "", arr_id: int | None = None) -> None:
         if self._is_dupe(f"movie|{_norm(title)}|{year}"):
             log.info("Movie already announced, skipped: %s (%s)", title, year)
             return
-        requester = self.pop_requester(requester_key)
-        lines = [t("new_movie", title=_plain(title)) + (f" ({_plain(year)})" if year else "")]
-        if quality:
-            lines.append(t("quality", quality=_plain(quality)))
-        if requester:
-            lines.append(t("requested_by", name=_plain(requester)))
-        if overview:
-            lines.append("")
-            lines.append(f"*{_plain(_truncate(overview, OVERVIEW_MAX_CHARS))}*")
-        log.info("[%s] Movie: %s (%s)", source, title, year)
-        self._enqueue(OutgoingMessage("\n".join(lines), poster))
+        now = time.time()
+        movie = PendingMovie(title=title, year=year, overview=overview, quality=quality, poster=poster,
+                             source=source, requester=self.pop_requester(requester_key),
+                             due=now + max(AGGREGATE_SECONDS, 0), first_seen=now, arr_id=arr_id)
+        with self._lock:
+            self._pending[f"movie|{_norm(title)}|{year}"] = movie
+        log.info("[%s] Movie queued: %s (%s)", source, title, year)
 
-    # -- Episodes (bundled per show + season) ---------------------------------------- #
+    # -- Episodes (bundled per show, across seasons) --------------------------------- #
     def add_episodes(self, *, series: str, year: str, episodes: list[tuple[int, int, str]],
-                     quality: str, poster: Poster | None, source: str, requester_key: str = "") -> None:
+                     quality: str, poster: Poster | None, source: str, requester_key: str = "",
+                     arr_id: int | None = None) -> None:
         """episodes: list of (season, episode, title)."""
         requester = self.pop_requester(requester_key)
+        gkey = f"series|{_norm(series)}"
         for season, number, title in episodes:
             if self._is_dupe(f"ep|{_norm(series)}|{season}|{number}"):
                 log.info("Episode already announced, skipped: %s S%02dE%02d", series, season, number)
                 continue
-            gkey = f"{_norm(series)}|{season}"
+            now = time.time()
             with self._lock:
                 group = self._pending.get(gkey)
                 if group is None:
-                    group = EpisodeGroup(series=series, year=year, season=season, source=source,
-                                         poster=poster, due=time.time() + max(AGGREGATE_SECONDS, 0))
+                    group = EpisodeGroup(series=series, year=year, source=source, poster=poster, first_seen=now)
                     self._pending[gkey] = group
-                group.episodes[number] = title or group.episodes.get(number, "")
+                # quiet time: every new episode pushes the announcement back a little
+                group.due = now + max(AGGREGATE_SECONDS, 0)
+                group.episodes[(season, number)] = title or group.episodes.get((season, number), "")
                 if quality:
                     group.qualities.add(quality)
                 if group.poster is None and poster is not None:
                     group.poster = poster
                 if requester and not group.requester:
                     group.requester = requester
+                if arr_id and not group.arr_id:
+                    group.arr_id = arr_id
             log.info("[%s] Episode queued: %s S%02dE%02d", source, series, season, number)
 
-    def _flush(self, gkey: str) -> None:
+    def _flush(self, key: str) -> None:
         with self._lock:
-            group = self._pending.pop(gkey, None)
-        if not group or not group.episodes:
-            return
-        self._enqueue(OutgoingMessage(self._format_group(group), group.poster))
+            item = self._pending.pop(key, None)
+        if isinstance(item, PendingMovie):
+            log.info("[%s] Movie announced: %s (%s)", item.source, item.title, item.year)
+            self._enqueue(OutgoingMessage(self._format_movie(item), item.poster))
+        elif isinstance(item, EpisodeGroup) and item.episodes:
+            self._enqueue(OutgoingMessage(self._format_group(item), item.poster))
+
+    @staticmethod
+    def _format_movie(m: PendingMovie) -> str:
+        lines = [t("new_movie", title=_plain(m.title)) + (f" ({_plain(m.year)})" if m.year else "")]
+        if m.quality:
+            lines.append(t("quality", quality=_plain(m.quality)))
+        if m.requester:
+            lines.append(t("requested_by", name=_plain(m.requester)))
+        if m.overview:
+            lines.append("")
+            lines.append(f"*{_plain(_truncate(m.overview, OVERVIEW_MAX_CHARS))}*")
+        return "\n".join(lines)
 
     @staticmethod
     def _format_group(g: EpisodeGroup) -> str:
         count = len(g.episodes)
         label = t("new_episode") if count == 1 else t("new_episodes", count=count)
-        season_txt = t("specials") if g.season == 0 else t("season", n=g.season)
+        seasons = sorted({season for season, _ in g.episodes})
+        if len(seasons) == 1:
+            season_txt = t("specials") if seasons[0] == 0 else t("season", n=seasons[0])
+        else:
+            season_txt = t("seasons_list", numbers=", ".join(map(str, seasons)))
         lines = [f"📺 **{label}:** {_plain(g.series)} – {season_txt}"]
-        numbers = sorted(g.episodes)
-        for num in numbers[:MAX_EPISODES_LISTED]:
-            title = g.episodes[num]
-            lines.append(f"S{g.season:02d}E{num:02d}" + (f" – {_plain(title)}" if title else ""))
+        keys = sorted(g.episodes)
+        for season, number in keys[:MAX_EPISODES_LISTED]:
+            title = g.episodes[(season, number)]
+            lines.append(f"S{season:02d}E{number:02d}" + (f" – {_plain(title)}" if title else ""))
         if count > MAX_EPISODES_LISTED:
             lines.append(t("more_episodes", count=count - MAX_EPISODES_LISTED))
         if g.qualities:
@@ -757,6 +827,7 @@ class Relay:
         self._enqueue(OutgoingMessage(text))
 
     def flush_all(self) -> None:
+        """On shutdown: post everything that is still waiting (no queue check)."""
         with self._lock:
             keys = list(self._pending)
         for key in keys:
@@ -850,6 +921,7 @@ def health_status() -> tuple[int, dict]:
         body["flusher"] = "running" if RELAY.flusher_thread.is_alive() else "stopped"
         body["signal"] = "failing" if RELAY.signal_failing_since else "ok"
         body["pending_retries"] = RELAY.retry_count
+        body["pending_announcements"] = RELAY.pending_count
         if body["sender"] == "stopped":
             problems.append("Signal sender thread stopped")
         if body["flusher"] == "stopped":
@@ -925,7 +997,8 @@ def handle_sonarr(data: dict) -> str:
     tvdb_id = _to_int(series.get("tvdbId"))
     RELAY.add_episodes(series=title, year=_clean(series.get("year"), 4), episodes=episodes,
                        quality=quality, poster=_arr_poster(series.get("images")), source="Sonarr",
-                       requester_key=f"series:{tvdb_id}" if tvdb_id else "")
+                       requester_key=f"series:{tvdb_id}" if tvdb_id else "",
+                       arr_id=_to_int(series.get("id")))
     return "ok"
 
 
@@ -948,6 +1021,7 @@ def handle_radarr(data: dict) -> str:
         quality=_clean(_dict(data.get("movieFile")).get("quality"), 60),
         poster=_arr_poster(movie.get("images")),
         source="Radarr",
+        arr_id=_to_int(movie.get("id")),
     )
     return "ok"
 
@@ -1363,6 +1437,42 @@ class ArrClient:
 
     def grab(self, release: dict) -> None:
         self.call("POST", "/release", {"guid": release.get("guid"), "indexerId": release.get("indexerId")}, timeout=60)
+
+
+_QUEUE_BUSY_STATES = {"downloading", "importpending", "importing"}   # trackedDownloadState
+_QUEUE_WAITING_STATUSES = {"queued", "delay", "downloading"}         # status (delay = delay profile)
+
+
+def make_queue_check(clients: list[ArrClient]):
+    """Returns queue_check(kind, arr_id) for the Relay, or None if neither Sonarr nor Radarr is configured.
+    Uses /queue/details?seriesId= / ?movieId= (verified to exist on Sonarr v4 and Radarr)."""
+    by_kind = {c.kind: c for c in clients if c.enabled}
+    if not by_kind:
+        return None
+
+    def queue_check(kind: str, arr_id: int) -> bool:
+        client = by_kind.get(kind)
+        if client is None:
+            return False
+        param = "seriesId" if kind == "sonarr" else "movieId"
+        try:
+            records = _list(client.call("GET", f"/queue/details?{param}={arr_id}"))
+        except ArrError as exc:
+            # Never let an unreachable Sonarr/Radarr swallow an announcement – post instead
+            log.warning("%s queue not readable (%s) – announcing without waiting", client.name, exc.user_msg)
+            return False
+        for record in records:
+            record = _dict(record)
+            # stuck items (warning/error: failed, import blocked, …) must not block forever
+            if str(record.get("trackedDownloadStatus") or "ok").lower() != "ok":
+                continue
+            state = str(record.get("trackedDownloadState") or "").lower()
+            status = str(record.get("status") or "").lower()
+            if state in _QUEUE_BUSY_STATES or status in _QUEUE_WAITING_STATUSES:
+                return True
+        return False
+
+    return queue_check
 
 
 @dataclass(eq=False)
@@ -2399,7 +2509,7 @@ def validate_config() -> list[str]:
     """Report configuration typos at startup instead of at the first request in the chat."""
     problems = []
     if not re.fullmatch(r"\+\d{6,15}", SIGNAL_NUMBER or ""):
-        problems.append("SIGNAL_NUMBER must look like +491701234567")
+        problems.append("SIGNAL_NUMBER must look like +4900000000000")
     if not (SIGNAL_RECIPIENT.startswith("group.") and _internal_group_id(SIGNAL_RECIPIENT)) \
             and not re.fullmatch(r"\+\d{6,15}", SIGNAL_RECIPIENT):
         problems.append("SIGNAL_RECIPIENT must be a valid group ID (group.…) or phone number")
@@ -2418,7 +2528,9 @@ def validate_config() -> list[str]:
                                    ("REQUEST_COMMANDS_PER_MINUTE", COMMANDS_PER_MINUTE, 1, 60),
                                    ("SIGNAL_RETRY_INTERVAL", SIGNAL_RETRY_INTERVAL, 1, 600),
                                    ("SIGNAL_RETRY_WINDOW", SIGNAL_RETRY_WINDOW, 0, 86400),
-                                   ("HEALTH_GRACE_SECONDS", HEALTH_GRACE_SECONDS, 1, 3600)):
+                                   ("HEALTH_GRACE_SECONDS", HEALTH_GRACE_SECONDS, 1, 3600),
+                                   ("ANNOUNCE_MAX_WAIT_SECONDS", ANNOUNCE_MAX_WAIT_SECONDS, 0, 7 * 86400),
+                                   ("QUEUE_RECHECK_SECONDS", QUEUE_RECHECK_SECONDS, 1, 3600)):
         if not low <= value <= high:
             problems.append(f"{name} must be between {low} and {high} (is {value})")
     if REQUESTS_ENABLED:
@@ -2467,7 +2579,14 @@ def main() -> None:
         log.warning("BOT_LANGUAGE is not set – bot messages are in English. "
                     "Set BOT_LANGUAGE=de for German (the default changed in 0.9.0).")
 
-    RELAY = Relay()
+    queue_check = make_queue_check([
+        ArrClient("sonarr", SONARR_URL, SONARR_API_KEY, SONARR_QUALITY_PROFILE, SONARR_ROOT_FOLDER),
+        ArrClient("radarr", RADARR_URL, RADARR_API_KEY, RADARR_QUALITY_PROFILE, RADARR_ROOT_FOLDER),
+    ])
+    if ANNOUNCE_WAIT_FOR_QUEUE:
+        log.info("Announcements wait for an empty download queue per show/movie: %s",
+                 "enabled" if queue_check else "no Sonarr/Radarr configured – quiet time only")
+    RELAY = Relay(queue_check=queue_check)
     if REQUESTS_ENABLED:
         REQUESTS = RequestService(RELAY)
         REQUESTS.start()

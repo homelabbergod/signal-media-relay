@@ -31,6 +31,24 @@ JELLYFIN_ID = "0123456789abcdef0123456789abcdef"
 sent_to_signal: list[dict] = []          # bodies the relay POSTed to /v2/send
 fetched: list[tuple[str, dict]] = []     # (path, headers) of every GET the relay made
 flaky_attempts: list[float] = []         # send attempts for the "FLAKY" message
+queue_calls: dict[str, int] = {}         # fake Sonarr/Radarr queue: calls per "seriesId=42" / "movieId=77"
+BUSY = [{"status": "downloading", "trackedDownloadStatus": "ok", "trackedDownloadState": "downloading"}]
+STUCK = [{"status": "completed", "trackedDownloadStatus": "warning", "trackedDownloadState": "importPending"}]
+
+
+def fake_queue(query: str) -> list:
+    """seriesId=42 busy for 3 calls, 43 always busy, 44 only a stuck item, movieId=77 busy for 2 calls."""
+    queue_calls[query] = queue_calls.get(query, 0) + 1
+    n = queue_calls[query]
+    if query == "seriesId=42":
+        return BUSY if n <= 3 else []
+    if query == "seriesId=43":
+        return BUSY
+    if query == "seriesId=44":
+        return STUCK
+    if query == "movieId=77":
+        return BUSY if n <= 2 else []
+    return []
 failures: list[str] = []
 
 
@@ -53,6 +71,14 @@ class FakeUpstream(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.startswith("/api/v3/queue/details?"):     # fake Sonarr/Radarr queue
+            body = json.dumps(fake_queue(self.path.split("?", 1)[1])).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         fetched.append((self.path, dict(self.headers)))
         if self.path.startswith("/redirect"):          # tries to bounce the relay to a foreign host
             self.send_response(302)
@@ -105,7 +131,9 @@ def main() -> int:
                LISTEN_HOST="127.0.0.1", LISTEN_PORT=str(relay_port), AGGREGATE_SECONDS="1",
                ANNOUNCE_TESTS="true", SEND_POSTERS="true", POSTER_ALLOWED_HOSTS="127.0.0.1",
                JELLYFIN_URL=upstream, JELLYFIN_API_KEY="jfkey", PYTHONIOENCODING="utf-8",
-               SIGNAL_RETRY_INTERVAL="1", SIGNAL_RETRY_WINDOW="8")
+               SIGNAL_RETRY_INTERVAL="1", SIGNAL_RETRY_WINDOW="8",
+               SONARR_URL=upstream, SONARR_API_KEY="sonarrkey", RADARR_URL=upstream, RADARR_API_KEY="radarrkey",
+               QUEUE_RECHECK_SECONDS="1", ANNOUNCE_MAX_WAIT_SECONDS="8")
 
     # 1) Startup refuses insecure configuration
     for token, label in (("", "missing"), ("change-me", "placeholder"), ("short", "too short")):
@@ -189,8 +217,18 @@ def main() -> int:
         post("/radarr", movie("BREAK-READ Movie", 2011, ""), auth)
         post("/radarr", movie("After Break", 2012, ""), auth)
         post("/radarr", movie("FLAKY Movie", 2013, ""), auth)
+        # 0.9.2: wait for an empty queue per show/movie; one message per show across seasons
+        def show(title, sid, season, ep):
+            return {"eventType": "Download", "series": {"title": title, "id": sid},
+                    "episodes": [{"seasonNumber": season, "episodeNumber": ep, "title": f"Ep {season}-{ep}"}]}
+        post("/sonarr", show("Queue Show", 42, 1, 1), auth)
+        post("/sonarr", show("Stuck Show", 43, 1, 1), auth)
+        post("/sonarr", show("Failed Show", 44, 1, 1), auth)
+        post("/radarr", {"eventType": "Download", "movie": {"title": "Queued Movie", "year": 2014, "id": 77}}, auth)
+        time.sleep(1.5)
+        post("/sonarr", show("Queue Show", 42, 2, 3), auth)     # arrives while the show is still downloading
 
-        expected = 3 + 7 + 1 + 2 + 3 + 70 + 2   # 3 test pings, 7 announcements, 1 bundle, ... + After Break, FLAKY
+        expected = 3 + 7 + 1 + 2 + 3 + 70 + 2 + 4   # ... + After Break, FLAKY + 4 queue scenarios
         deadline = time.time() + 60
         while len(sent_to_signal) < expected and time.time() < deadline:
             time.sleep(0.2)
@@ -252,6 +290,17 @@ def main() -> int:
           bool(message("After Break")) and not message("BREAK-READ"))
     check("Signal down for 4 attempts -> message kept in the retry list and delivered later",
           bool(message("FLAKY Movie")) and len(flaky_attempts) >= 5)
+    queue_show = [m["message"] for m in sent_to_signal if "Queue Show" in m["message"]]
+    check("show still downloading -> waits, then ONE message across seasons (not one per season/batch)",
+          len(queue_show) == 1 and "2 new episodes:** Queue Show – Seasons 1, 2" in queue_show[0]
+          and "S01E01" in queue_show[0] and "S02E03" in queue_show[0] and queue_calls.get("seriesId=42", 0) >= 4)
+    check("download stuck forever -> announced anyway after ANNOUNCE_MAX_WAIT_SECONDS",
+          bool(message("Stuck Show")) and "announcing anyway" in log_text)
+    check("only a stuck/failed queue item (warning) -> does not block the announcement",
+          bool(message("Failed Show")) and queue_calls.get("seriesId=44", 0) >= 1)
+    queued_movie = [m["message"] for m in sent_to_signal if "Queued Movie" in m["message"]]
+    check("movie waits for Radarr's queue, then is announced on its own",
+          len(queued_movie) == 1 and queued_movie[0].startswith("🎬") and queue_calls.get("movieId=77", 0) >= 3)
     check("/health reports running sender/flusher", health_after.get("status") == "ok"
           and health_after.get("sender") == "running" and health_after.get("flusher") == "running")
 

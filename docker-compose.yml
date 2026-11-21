@@ -32,7 +32,7 @@ services:
     environment:
       # --- Signal -----------------------------------------------------------
       SIGNAL_API_URL: "http://signal-api:8080"
-      SIGNAL_NUMBER: "+491701234567"              # number of the bot account
+      SIGNAL_NUMBER: "+4900000000000"              # number of the bot account
       SIGNAL_RECIPIENT: "group.REPLACE_ME"        # group ID (see README) or phone number
       BOT_LANGUAGE: "en"                          # language of the bot messages: en, de
 
@@ -44,7 +44,9 @@ services:
       LISTEN_PORT: "8090"
 
       # --- Announcements ----------------------------------------------------
-      AGGREGATE_SECONDS: "60"                     # collect episodes of a season this long
+      AGGREGATE_SECONDS: "60"                     # quiet time: post after N s without a new episode
+      ANNOUNCE_WAIT_FOR_QUEUE: "true"             # wait until Sonarr/Radarr finished this show/movie
+      ANNOUNCE_MAX_WAIT_SECONDS: "21600"          # ... but announce after 6 h at the latest
       DEDUPE_HOURS: "24"                          # don't post the same item twice (0 = off)
       MAX_EPISODES_LISTED: "10"
       OVERVIEW_MAX_CHARS: "350"

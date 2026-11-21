@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.2
+
+### Changed
+- **Less noise in the group:** a show is announced **once**, when Sonarr has nothing left for it in the download queue. Previously, episodes trickling in over hours produced several messages for the same show.
+  - All new episodes of a show go into one message, across seasons ("Seasons 1, 2").
+  - The relay asks Sonarr/Radarr only about that show/movie (`/queue/details?seriesId=` / `?movieId=`), so a large or stuck download of another title doesn't delay anything.
+  - Stuck queue items (warning/error, e.g. import blocked) don't block an announcement.
+  - After `ANNOUNCE_MAX_WAIT_SECONDS` (6 h) it is announced anyway.
+  - If Sonarr/Radarr can't be reached, the relay announces instead of waiting.
+- **Movies:** still one message per movie, but only once Radarr has finished with that movie.
+- **`AGGREGATE_SECONDS` is now a quiet time:** each new episode of a show pushes the announcement back. Jellyfin-only setups (no Sonarr/Radarr access) rely on this alone.
+- **Configuration:** new settings `ANNOUNCE_WAIT_FOR_QUEUE` (default `true`), `ANNOUNCE_MAX_WAIT_SECONDS` and `QUEUE_RECHECK_SECONDS`. The queue check only needs `SONARR_URL`/`RADARR_URL` plus API keys, `!request` doesn't have to be enabled.
+- **`/health`:** also reports `pending_announcements`.
+
 ## 0.9.1
 
 Result of a review with three perspectives (developer, DevSecOps, user). This release prepares the move to Unraid.

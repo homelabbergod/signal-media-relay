@@ -34,11 +34,11 @@ TOKEN = "s3cret-token-0123456789"
 BOT = "+4900000000"
 GROUP_INTERNAL = "dGVzdC1ncm91cC1pZA=="                      # internal id as it appears in messages
 GROUP = "group." + base64.b64encode(GROUP_INTERNAL.encode()).decode()
-MEMBER, MEMBER2, OUTSIDER = "+4911111111", "+4912121212", "+4999999999"
-MEMBER3, ADMIN = "+4913131313", "+4914141414"
-MEMBER4, MEMBER5, MEMBER6 = "+4915151515", "+4916161616", "+4917171717"
-MEMBER7, MEMBER8, MEMBER9 = "+4918181818", "+4919191919", "+4920202020"
-MEMBER10 = "+4921212121"
+MEMBER, MEMBER2, OUTSIDER = "+4900000000011", "+4900000000012", "+4900000000099"
+MEMBER3, ADMIN = "+4900000000013", "+4900000000014"
+MEMBER4, MEMBER5, MEMBER6 = "+4900000000015", "+4900000000016", "+4900000000017"
+MEMBER7, MEMBER8, MEMBER9 = "+4900000000018", "+4900000000019", "+4900000000020"
+MEMBER10 = "+4900000000021"
 
 chat_in: "queue.Queue[dict | None]" = queue.Queue()         # messages pushed to the relay via WebSocket
 sent: list[dict] = []                                       # what the relay sent to Signal
@@ -403,7 +403,7 @@ def main() -> int:
         check("daily limit (2) reached -> refused", expect_reply("limit 2") is not None)
         check("limit: nothing added to Radarr", not any(b.get("tmdbId") == 8006 for _, b in added))
 
-        say("!request Sample Movie", sender="+4922222222", name="Ben", group="b3RoZXItZ3JvdXA=")
+        say("!request Sample Movie", sender="+4900000000022", name="Ben", group="b3RoZXItZ3JvdXA=")
         check("message from another group -> ignored", no_new_reply())
 
         say("!request Sample Movie", age=7200)
@@ -420,9 +420,9 @@ def main() -> int:
         check("own message from phone (sync message) -> handled", expect_reply("How to request") is not None)
 
         for _ in range(7):
-            say("!hilfe", sender="+4933333333", name="Spam")
+            say("!hilfe", sender="+4900000000033", name="Spam")
         time.sleep(3)
-        spam = [m for m in sent if m.get("quote_author") == "+4933333333"]
+        spam = [m for m in sent if m.get("quote_author") == "+4900000000033"]
         check("spam brake: 6 answered + 1 'slow down' notice",
               len(spam) == 7 and sum("Too many commands" in m["message"] for m in spam) == 1)
 
