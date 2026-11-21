@@ -7,7 +7,7 @@
 -->
 <Container version="2">
   <Name>signal-media-relay</Name>
-  <Repository>homelabbergod/signal-media-relay:0.9.2</Repository>
+  <Repository>homelabbergod/signal-media-relay:0.10.0</Repository>
   <Registry>https://hub.docker.com/r/homelabbergod/signal-media-relay</Registry>
   <Network>signal-net</Network>
   <MyIP/>

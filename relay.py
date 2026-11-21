@@ -27,7 +27,7 @@ Python standard library only, no dependencies.
 
 from __future__ import annotations
 
-__version__ = "0.9.2"
+__version__ = "0.10.0"
 
 import base64
 import binascii
@@ -141,7 +141,9 @@ REQUEST_ADMINS = {                                                # may grab rel
 RELEASES_SHOWN = _env_int("RELEASES_SHOWN", 8)                    # how many releases !releases shows
 RELEASE_SEARCH_TIMEOUT = _env_int("RELEASE_SEARCH_TIMEOUT", 180)  # seconds for the indexer search
 REQUEST_MAX_AGE_SECONDS = 3600      # ignore older commands (e.g. delivered late after downtime)
-SELECTION_TTL_SECONDS = 600         # how long a result list is valid for "!request <no.>"
+# how long a result/release list is valid; an unpicked release list then removes the title again
+SELECTION_TTL_SECONDS = max(_env_int("SELECTION_TTL_SECONDS", 600), 2)
+SELECTION_CHECK_SECONDS = max(1, min(15, SELECTION_TTL_SECONDS // 4))   # how often expired release lists are checked
 COMMANDS_PER_MINUTE = _env_int("REQUEST_COMMANDS_PER_MINUTE", 6)   # spam brake per person
 # Signal unreachable: failed messages go to a "retry later" list instead of being dropped
 SIGNAL_RETRY_INTERVAL = _env_int("SIGNAL_RETRY_INTERVAL", 60)      # seconds between retries
@@ -179,16 +181,18 @@ MESSAGES: dict[str, dict[str, str]] = {
         "unknown_series": "Unknown show",
         # help / general
         "usage": ("ℹ️ **How to request something:**\n"
-                  "!request <title> – movie or show; downloaded according to the quality profile\n"
-                  "For shows the bot asks which season (0 = all) – or directly: “!request Example Show s2”\n"
+                  "!request <title> – movie or show; the bot shows the matching releases\n"
+                  "!grab <no.> – download a release from the list (nothing is downloaded before)\n"
+                  "No matching release yet? Then it is downloaded automatically once one is available.\n"
+                  "Shows: whole seasons only – the bot asks which season (0 = all) "
+                  "or directly: “!request Example Show s2”\n"
                   "!request movie <title> / !request show <title> – movies only / shows only\n"
                   "Tip: add the year, e.g. “!request Example Movie 2021”\n"
                   "\n"
-                  "**Pick a specific release:**\n"
-                  "!releases <title> – indexer release list (shows: “!releases <title> s2”)\n"
+                  "**More:**\n"
+                  "!releases <title> – release list only (shows: “!releases <title> s2”)\n"
                   "!releases – list for the title you picked last\n"
-                  "!grab <no.> – download a release from the list\n"
-                  "!release <release name> – download exactly this release\n"
+                  "!release <release name> – download exactly this release (also single episodes)\n"
                   "\n"
                   "Tip: you can also reply to a bot list with just the number (as a quote).\n"
                   "!id – sends you your Signal ID privately (for admin settings)"),
@@ -230,23 +234,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "what_many": "seasons {numbers}",
         "season_complete": "{label} – {what} is already complete 🍿",
         "already_in_arr": "{label} is already in {arr} 📚",
-        "series_requested": ("✅ **Requested:** {label} – {what}\n"
-                             "Sonarr is now searching according to the quality profile – "
-                             "new episodes will be announced {where}.{upcoming}"),
-        "upcoming": "\n📅 The show hasn't started yet – episodes will be downloaded as they air.",
         "no_such_season": "❓ {label} has no season {season}. Available: {known}.",
+        "series_later": ("✅ **Requested:** {label}\nNo season is out yet – Sonarr downloads the episodes as they air; "
+                         "they will be announced {where}."),
         "none": "none",
         # movies
         "movie_available": "{label} is already available 🍿",
         "movie_searching": "{label} has already been requested and is being searched ⏳{hint}",
-        "movie_remonitored": ("✅ **Requested:** {label}\nWas in Radarr but not being searched – active again now. "
-                              "It will be announced {where} once it's there.{hint}"),
-        "movie_requested": ("✅ **Requested:** {label}\n{arr} is searching for it now – it will be announced {where} "
-                            "once it's there.{hint}\nWant a specific release? → “!releases”"),
         "release_hint": "\n📅 Not out for download yet{when} – it will be downloaded automatically once available.",
         "release_hint_when": " (expected from {date})",
         # releases
-        "added_no_search": "➕ {label} was added to {arr} (without automatic search).",
         "which_title": "❓ Which title? E.g. “!releases Example Movie 2021” or “!releases Example Show s2”.",
         "which_season": "❓ Which season of {label}? E.g. “!releases s1”.{known}",
         "available_seasons": " Available: {numbers}.",
@@ -257,6 +254,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "no_releases_hidden": " ({count} don't match the quality profile – only an admin may grab those)",
         "releases_header": "📦 **Releases for {label}**{season}:",
         "grab_hint": "Reply with “!grab <no.>” (valid for {minutes} min)",
+        "pick_hint": "ℹ️ Nothing is downloaded until you pick a release.",
+        "auto_later": ("📭 No matching release for {what} right now{extra}.\n✅ {arr} will download it automatically "
+                       "as soon as one is available – it will be announced {where}.{hint}"),
+        "pick_expired": "⌛ No release picked for {what} – nothing will be downloaded.",
+        "pick_expired_removed": " {label} was removed from {arr} again.",
         "more_not_shown": " · {count} more not shown",
         "seeds": "{count} seeds",
         "rejected_default": "rejected by the profile",
@@ -276,7 +278,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         "no_title_for": "🔍 I can't find a movie/show for “{title}”{year} in {arr}.",
         "searching_release": "🔎 Searching “{name}” at the indexers … (may take a while)",
         "similar_releases": "🔍 “{name}” doesn't exist like that – similar releases for {label}:",
-        "kept_for_choice": "➕ {label} was added to {arr} so you can pick a release (no search started).",
         "release_not_found": "🔍 The indexers don't have “{name}” (any more){checked}.",
         "checked": " (checked: {titles})",
         # Radarr/Sonarr errors
@@ -301,16 +302,18 @@ MESSAGES: dict[str, dict[str, str]] = {
         "unknown_movie": "Unbekannter Film",
         "unknown_series": "Unbekannte Serie",
         "usage": ("ℹ️ **So fragst du etwas an:**\n"
-                  "!request <Titel> – Film oder Serie; geladen wird passend zum Qualitätsprofil\n"
-                  "Bei Serien fragt der Bot nach der Staffel (0 = alle) – oder direkt: „!request Beispielserie s2“\n"
+                  "!request <Titel> – Film oder Serie; der Bot zeigt die passenden Releases\n"
+                  "!grab <Nr> – Release aus der Liste laden (vorher wird nichts geladen)\n"
+                  "Noch kein passendes Release? Dann wird automatisch geladen, sobald eins verfügbar ist.\n"
+                  "Serien: nur ganze Staffeln – der Bot fragt nach der Staffel (0 = alle) "
+                  "oder direkt: „!request Beispielserie s2“\n"
                   "!request film <Titel> / !request serie <Titel> – nur Filme / nur Serien\n"
                   "Tipp: Jahr anhängen, z. B. „!request Beispielfilm 2021“\n"
                   "\n"
-                  "**Bestimmtes Release wählen:**\n"
-                  "!releases <Titel> – Release-Liste der Indexer (Serien: „!releases <Titel> s2“)\n"
+                  "**Mehr:**\n"
+                  "!releases <Titel> – nur die Release-Liste (Serien: „!releases <Titel> s2“)\n"
                   "!releases – Liste für deinen zuletzt gewählten Titel\n"
-                  "!grab <Nr> – Release aus der Liste laden\n"
-                  "!release <Release-Name> – genau dieses Release laden\n"
+                  "!release <Release-Name> – genau dieses Release laden (auch einzelne Folgen)\n"
                   "\n"
                   "Tipp: Auf eine Liste des Bots kannst du auch einfach mit der Nummer antworten (Zitat).\n"
                   "!id – schickt dir deine Signal-ID privat (für Admin-Einstellungen)"),
@@ -351,21 +354,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "what_many": "Staffeln {numbers}",
         "season_complete": "{label} – {what} ist schon vollständig da 🍿",
         "already_in_arr": "{label} ist schon in {arr} vorhanden 📚",
-        "series_requested": ("✅ **Angefragt:** {label} – {what}\n"
-                             "Sonarr sucht jetzt passend zum Qualitätsprofil – neue Folgen werden {where} "
-                             "angekündigt.{upcoming}"),
-        "upcoming": "\n📅 Die Serie ist noch nicht gestartet – Folgen werden geladen, sobald sie erscheinen.",
         "no_such_season": "❓ Staffel {season} gibt es bei {label} nicht. Verfügbar: {known}.",
+        "series_later": ("✅ **Angefragt:** {label}\nNoch keine Staffel erschienen – Sonarr lädt die Folgen, sobald sie "
+                         "erscheinen; sie werden {where} angekündigt."),
         "none": "keine",
         "movie_available": "{label} ist schon verfügbar 🍿",
         "movie_searching": "{label} ist schon angefragt und wird gesucht ⏳{hint}",
-        "movie_remonitored": ("✅ **Angefragt:** {label}\nWar in Radarr, wurde aber nicht gesucht – jetzt wieder aktiv. "
-                              "Sobald es da ist, wird es {where} angekündigt.{hint}"),
-        "movie_requested": ("✅ **Angefragt:** {label}\n{arr} sucht jetzt danach – sobald es da ist, wird es {where} "
-                            "angekündigt.{hint}\nLieber ein bestimmtes Release? → „!releases“"),
         "release_hint": "\n📅 Noch nicht als Download erschienen{when} – wird automatisch geladen, sobald es verfügbar ist.",
         "release_hint_when": " (voraussichtlich ab {date})",
-        "added_no_search": "➕ {label} wurde zu {arr} hinzugefügt (ohne automatische Suche).",
         "which_title": "❓ Für welchen Titel? Z. B. „!releases Beispielfilm 2021“ oder „!releases Beispielserie s2“.",
         "which_season": "❓ Welche Staffel von {label}? Z. B. „!releases s1“.{known}",
         "available_seasons": " Verfügbar: {numbers}.",
@@ -376,6 +372,11 @@ MESSAGES: dict[str, dict[str, str]] = {
         "no_releases_hidden": " ({count} passen nicht zum Qualitätsprofil – die darf nur ein Admin holen)",
         "releases_header": "📦 **Releases für {label}**{season}:",
         "grab_hint": "Antworte mit „!grab <Nr>“ (gilt {minutes} Min.)",
+        "pick_hint": "ℹ️ Geladen wird erst, wenn du ein Release auswählst.",
+        "auto_later": ("📭 Für {what} gibt es gerade kein passendes Release{extra}.\n✅ {arr} lädt es automatisch, "
+                       "sobald eins verfügbar ist – es wird {where} angekündigt.{hint}"),
+        "pick_expired": "⌛ Für {what} wurde kein Release gewählt – es wird nichts geladen.",
+        "pick_expired_removed": " {label} wurde wieder aus {arr} entfernt.",
         "more_not_shown": " · {count} weitere nicht angezeigt",
         "seeds": "{count} Seeds",
         "rejected_default": "vom Profil abgelehnt",
@@ -396,7 +397,6 @@ MESSAGES: dict[str, dict[str, str]] = {
         "no_title_for": "🔍 Zu „{title}“{year} finde ich in {arr} keinen Film/keine Serie.",
         "searching_release": "🔎 Suche „{name}“ bei den Indexern … (kann etwas dauern)",
         "similar_releases": "🔍 „{name}“ gibt es so nicht – ähnliche Releases für {label}:",
-        "kept_for_choice": "➕ {label} wurde zu {arr} hinzugefügt, damit du ein Release wählen kannst (keine Suche gestartet).",
         "release_not_found": "🔍 „{name}“ haben die Indexer nicht (mehr){checked}.",
         "checked": " (geprüft: {titles})",
         "arr_forbidden": "⚠️ {arr} verweigert den Zugriff (API-Key falsch?) – bitte Admin Bescheid geben.",
@@ -1366,17 +1366,26 @@ class ArrClient:
         result = self.call("GET", f"{path}?term={urllib.parse.quote(term)}")
         return [r for r in _list(result) if isinstance(r, dict)]
 
-    def add(self, item: dict, search: bool = True, seasons: set[int] | None = None) -> dict:
-        """Add a title. search=False: only monitor, don't start an automatic search.
+    def add(self, item: dict, search: bool = True, seasons: set[int] | None = None,
+            monitored: bool = True) -> dict:
+        """Add a title. search=False: don't start an automatic search.
+        monitored=False: nothing is monitored – Radarr/Sonarr won't grab anything on their own, not even via
+        RSS (used until the user picked a release; verified with Radarr and Sonarr v4).
         seasons (Sonarr only): monitor exactly these seasons; None = SONARR_MONITOR."""
         profile_id, root_folder, extra = self._get_defaults()
         body = dict(item)
-        body.update(qualityProfileId=profile_id, rootFolderPath=root_folder, monitored=True, **extra)
+        body.update(qualityProfileId=profile_id, rootFolderPath=root_folder, monitored=monitored, **extra)
         if self.kind == "radarr":
             body["minimumAvailability"] = RADARR_MINIMUM_AVAILABILITY
-            body["addOptions"] = {"searchForMovie": search, "monitor": "movieOnly"}
+            body["addOptions"] = {"searchForMovie": search and monitored,
+                                  "monitor": "movieOnly" if monitored else "none"}
             return _dict(self.call("POST", "/movie", body))
         body["seasonFolder"] = True
+        if not monitored:
+            body["seasons"] = [dict(_dict(s), monitored=False) for s in _list(item.get("seasons"))]
+            body["addOptions"] = {"monitor": "none", "searchForMissingEpisodes": False,
+                                  "searchForCutoffUnmetEpisodes": False}
+            return _dict(self.call("POST", "/series", body))
         monitor = SONARR_MONITOR
         if seasons is not None:
             # Tested with Sonarr v4: season flags + monitor "skip" -> exactly these seasons incl. episodes
@@ -1407,19 +1416,46 @@ class ArrClient:
     def series(self, series_id: int) -> dict:
         return _dict(self.call("GET", f"/series/{series_id}"))
 
-    def monitor_seasons(self, series_id: int, seasons: set[int]) -> None:
-        """Existing show: additionally monitor seasons, then search for them."""
+    def set_movie_monitored(self, movie_id: int) -> None:
+        """Monitor a movie WITHOUT starting a search (after the user grabbed a release – no second download)."""
+        movie = self.movie(movie_id)
+        movie["monitored"] = True
+        self.call("PUT", f"/movie/{movie_id}", movie)
+
+    def monitor_episodes(self, series_id: int, episode_ids: list[int]) -> None:
+        """Monitor single episodes (and the show) without a search – after grabbing a single-episode release."""
+        series = self.series(series_id)
+        if not series.get("monitored"):
+            series["monitored"] = True
+            self.call("PUT", f"/series/{series_id}", series)
+        self.call("PUT", "/episode/monitor", {"episodeIds": episode_ids, "monitored": True})
+
+    def monitor_seasons(self, series_id: int, seasons: set[int], search: bool = True) -> None:
+        """Additionally monitor seasons; search=True: then search for them."""
         series = self.series(series_id)
         series["monitored"] = True
         series["seasons"] = [dict(_dict(s), monitored=bool(_dict(s).get("monitored"))
                                   or _to_int(_dict(s).get("seasonNumber")) in seasons)
                              for s in _list(series.get("seasons"))]
         self.call("PUT", f"/series/{series_id}", series)
+        if not search:
+            return
         if len(seasons) == 1:
             self.call("POST", "/command", {"name": "SeasonSearch", "seriesId": series_id,
                                            "seasonNumber": next(iter(seasons))})
         else:
             self.call("POST", "/command", {"name": "SeriesSearch", "seriesId": series_id})
+
+    def wait_for_episodes(self, series_id: int, attempts: int = 8) -> None:
+        """Sonarr fills in the episodes of a freshly added show asynchronously – a season search before
+        that finds nothing. Wait briefly (at most ~12 s)."""
+        for _ in range(attempts):
+            try:
+                if _list(self.call("GET", f"/episode?seriesId={series_id}")):
+                    return
+            except ArrError:
+                return
+            time.sleep(1.5)
 
     def parse(self, release_name: str) -> dict:
         """Let Radarr/Sonarr parse a release name (title, year, season/episode)."""
@@ -1534,6 +1570,22 @@ class Command:
         return self.uuid or self.number
 
 
+@dataclass(eq=False)
+class Selection:
+    """An open release list ("!grab <no.>"). Nothing is downloaded until the user picks a release:
+    titles the bot added for it stay unmonitored and are removed again if nothing is picked."""
+    cmd: Command
+    cand: Candidate
+    seasons: list[int] = field(default_factory=list)   # shows: seasons still to offer after the current one
+    season: int | None = None                           # season of the current list (shows)
+    episode_id: int | None = None                       # !release of a single episode
+    added_now: bool = False      # added by the bot for this selection -> removed again if nothing is picked
+    mandatory: bool = False      # from !request: no matching release -> monitor, Radarr/Sonarr load it later
+    committed: bool = False      # something was grabbed or monitored -> the title stays
+    releases: list[dict] = field(default_factory=list)
+    expires: float = 0.0
+
+
 _COMMANDS = ("!request", "!releases", "!release", "!grab", "!help", "!hilfe", "!id")
 # Every selection list of the bot contains this hint (both languages)
 _LIST_HINT = re.compile(r"[„“\"](!request|!releases|!grab) <(?:Nr|no\.)>")
@@ -1624,7 +1676,7 @@ class RequestService:
         self._warned: dict[str, float] = {}
         self._last_title: dict[str, tuple[float, Candidate]] = {}                 # for "!releases" without title
         self._season_lists: dict[str, tuple[float, Candidate, list[int]]] = {}    # season question for shows
-        self._release_lists: dict[str, tuple[float, Candidate, list[dict]]] = {}  # for "!grab <no.>"
+        self._release_lists: dict[str, Selection] = {}                           # for "!grab <no.>"
         self._members: tuple[float, frozenset[str]] = (0.0, frozenset())
         # _throttle runs on the receiver thread, _prune on the worker thread – they share these dicts
         self._state_lock = threading.Lock()
@@ -1775,9 +1827,10 @@ class RequestService:
         """Clean up expired selection lists and old counters (otherwise memory slowly grows)."""
         now = time.time()
         # one hour of grace, so "list expired" can still be reported
-        for store in (self._pending, self._last_title, self._season_lists, self._release_lists):
+        for store in (self._pending, self._last_title, self._season_lists):
             for key in [k for k, v in store.items() if v[0] < now - 3600]:
                 del store[key]
+        self._expire_selections()
         with self._state_lock:   # _recent/_warned are written by _throttle on the receiver thread
             for key in [k for k, v in self._recent.items() if not v or now - v[-1] > 60]:
                 del self._recent[key]
@@ -1788,7 +1841,14 @@ class RequestService:
 
     def _worker_loop(self) -> None:
         while True:
-            cmd = self._commands.get()
+            try:
+                cmd = self._commands.get(timeout=SELECTION_CHECK_SECONDS)
+            except queue.Empty:
+                try:   # also without new commands: expired selections remove their unpicked titles
+                    self._expire_selections()
+                except Exception:  # noqa: BLE001
+                    log.exception("Error while expiring release lists")
+                continue
             try:
                 self._prune()
                 self.handle(cmd)
@@ -1941,7 +2001,7 @@ class RequestService:
         lines = [t("results", query=_plain(query))]
         lines += [f"{i}. {c.label(details=True)}" + (t("already_there") if c.exists else "")
                   for i, c in enumerate(shown, 1)]
-        lines += ["", t("reply_with", action=action, hint=hint, minutes=SELECTION_TTL_SECONDS // 60)]
+        lines += ["", t("reply_with", action=action, hint=hint, minutes=SELECTION_TTL_SECONDS // 60 or 1)]
         lines += notes
         self._reply(cmd, "\n".join(lines))
         return None
@@ -1998,7 +2058,7 @@ class RequestService:
             elif cand.exists and season.get("monitored"):
                 line += t("season_requested")
             lines.append(line)
-        lines += ["", t("reply_with", action="!request", hint="", minutes=SELECTION_TTL_SECONDS // 60)]
+        lines += ["", t("reply_with", action="!request", hint="", minutes=SELECTION_TTL_SECONDS // 60 or 1)]
         self._reply(cmd, "\n".join(lines), poster=cand.poster())
 
     def _season_choice(self, cmd: Command, choice: int) -> bool:
@@ -2014,41 +2074,53 @@ class RequestService:
         return True
 
     def _add_series(self, cmd: Command, cand: Candidate, chosen: set[int], numbers: list[int]) -> None:
-        if not chosen or (len(chosen) > 1 and chosen == set(numbers)):
-            what = t("what_all")
-        elif len(chosen) == 1:
-            what = t("what_one", n=next(iter(chosen)))
-        else:
-            what = t("what_many", numbers=", ".join(map(str, sorted(chosen))))
+        info: dict[int, dict] = {}
         if cand.exists:
             _, info = self._season_overview(cand)
             if chosen and all(self._season_complete(info.get(n, {})) for n in chosen):
+                if len(chosen) > 1 and chosen == set(numbers):
+                    what = t("what_all")
+                elif len(chosen) == 1:
+                    what = t("what_one", n=next(iter(chosen)))
+                else:
+                    what = t("what_many", numbers=", ".join(map(str, sorted(chosen))))
                 self._reply(cmd, t("season_complete", label=cand.label(), what=what))
                 return
-            if self._limit_reached(cmd, cand.key):
-                return
+        if self._limit_reached(cmd, cand.key):
+            return
+        where = t("here") if cmd.in_group else t("in_group")
+        if not chosen:
+            # No season known yet (show hasn't started): there are no season packs to pick from ->
+            # Sonarr downloads the episodes as they air (SONARR_MONITOR)
             try:
-                cand.client.monitor_seasons(_to_int(cand.item.get("id")) or 0, chosen)
-            except ArrError as exc:
-                self._reply(cmd, exc.user_msg)
-                return
-        else:
-            if self._limit_reached(cmd, cand.key):
-                return
-            try:
-                # no seasons known (e.g. not started yet) -> default SONARR_MONITOR
-                cand.item = dict(cand.item, **cand.client.add(cand.item, search=True, seasons=chosen or None))
-            except ArrError as exc:
-                if exc.already_exists:
-                    self._reply(cmd, t("already_in_arr", label=cand.label(), arr=cand.client.name))
+                if cand.exists:
+                    cand.client.monitor_seasons(_to_int(cand.item.get("id")) or 0, set(), search=True)
                 else:
-                    self._reply(cmd, exc.user_msg)
+                    cand.item = dict(cand.item, **cand.client.add(cand.item, search=True))
+            except ArrError as exc:
+                self._add_failed(cmd, cand, exc)
                 return
-        self._count(cmd, cand)
-        log.info("Requested by %s: %s (%s) -> Sonarr", _mask_number(cmd.sender), cand.label(), what)
-        upcoming = t("upcoming") if str(cand.item.get("status") or "").lower() == "upcoming" else ""
-        self._reply(cmd, t("series_requested", label=cand.label(), what=what, upcoming=upcoming,
-                           where=t("here") if cmd.in_group else t("in_group")), poster=cand.poster())
+            self._count(cmd, cand)
+            log.info("Requested by %s: %s (no seasons yet) -> Sonarr", _mask_number(cmd.sender), cand.label())
+            self._reply(cmd, t("series_later", label=cand.label(), where=where), poster=cand.poster())
+            return
+        added_now = False
+        if not cand.exists:
+            try:   # nothing monitored: Sonarr must not download anything before a release is picked
+                cand.item = dict(cand.item, **cand.client.add(cand.item, search=False, monitored=False))
+            except ArrError as exc:
+                self._add_failed(cmd, cand, exc)
+                return
+            added_now = True
+            cand.client.wait_for_episodes(_to_int(cand.item.get("id")) or 0)
+        todo = [n for n in sorted(chosen) if not self._season_complete(info.get(n, {}))]
+        self._offer(Selection(cmd, cand, seasons=todo, added_now=added_now, mandatory=True))
+
+    def _add_failed(self, cmd: Command, cand: Candidate, exc: ArrError) -> None:
+        if exc.already_exists:
+            self._reply(cmd, t("already_in_arr", label=cand.label(), arr=cand.client.name))
+        else:
+            self._reply(cmd, exc.user_msg)
 
     # -- !request -------------------------------------------------------------------------- #
     def _add(self, cmd: Command, cand: Candidate, season: int | None = None) -> None:
@@ -2066,7 +2138,6 @@ class RequestService:
             else:
                 self._add_series(cmd, cand, set(numbers), numbers)   # only one season -> no question
             return
-        where = t("here") if cmd.in_group else t("in_group")
         if cand.exists:
             # The search doesn't report hasFile/monitored reliably for existing movies -> ask directly
             try:
@@ -2080,49 +2151,21 @@ class RequestService:
             if movie.get("monitored"):
                 self._reply(cmd, t("movie_searching", label=cand.label(), hint=_release_hint(movie)))
                 return
-            # in Radarr but unmonitored -> Radarr would never search it: activate again
+            # in Radarr but unmonitored -> offer the release list like for a new movie
             if self._limit_reached(cmd, cand.key):
                 return
-            try:
-                cand.client.monitor_movie(_to_int(movie.get("id")) or 0)
-            except ArrError as exc:
-                self._reply(cmd, exc.user_msg)
-                return
-            self._count(cmd, cand)
-            log.info("Monitored again by %s: %s", _mask_number(cmd.sender), cand.label())
-            self._reply(cmd, t("movie_remonitored", label=cand.label(), where=where, hint=_release_hint(movie)),
-                        poster=cand.poster())
+            cand.item = dict(cand.item, **movie)
+            self._offer(Selection(cmd, cand, mandatory=True))
             return
         if self._limit_reached(cmd, cand.key):
             return
-        try:
-            cand.item = dict(cand.item, **cand.client.add(cand.item))
+        try:   # unmonitored: Radarr must not download anything before a release is picked
+            cand.item = dict(cand.item, **cand.client.add(cand.item, search=False, monitored=False))
         except ArrError as exc:
-            if exc.already_exists:
-                self._reply(cmd, t("already_in_arr", label=cand.label(), arr=cand.client.name))
-            else:
-                self._reply(cmd, exc.user_msg)
+            self._add_failed(cmd, cand, exc)
             return
-        self._count(cmd, cand)
-        log.info("Requested by %s: %s -> %s", _mask_number(cmd.sender), cand.label(), cand.client.name)
-        self._reply(cmd, t("movie_requested", label=cand.label(), arr=cand.client.name, where=where,
-                           hint=_release_hint(cand.item)), poster=cand.poster())
-
-    def _ensure_in_library(self, cmd: Command, cand: Candidate) -> Candidate | None:
-        """For release selection the title must be in Radarr/Sonarr – otherwise add it without auto search."""
-        if cand.exists:
-            return cand
-        if self._limit_reached(cmd, cand.key):
-            return None
-        try:
-            cand.item = dict(cand.item, **cand.client.add(cand.item, search=False))
-        except ArrError as exc:
-            self._reply(cmd, exc.user_msg)
-            return None
-        self._count(cmd, cand)
-        log.info("Added without auto search by %s: %s", _mask_number(cmd.sender), cand.label())
-        self._reply(cmd, t("added_no_search", label=cand.label(), arr=cand.client.name))
-        return cand
+        log.info("Added unmonitored for the release choice by %s: %s", _mask_number(cmd.sender), cand.label())
+        self._offer(Selection(cmd, cand, added_now=True, mandatory=True))
 
     # -- !releases ------------------------------------------------------------------------- #
     def _cmd_releases(self, cmd: Command, args: str) -> None:
@@ -2147,9 +2190,21 @@ class RequestService:
             known = t("available_seasons", numbers=", ".join(map(str, seasons))) if seasons else ""
             self._reply(cmd, t("which_season", label=cand.label(), known=known))
             return
-        cand = self._ensure_in_library(cmd, cand)
-        if cand:
-            self._show_releases(cmd, cand, season)
+        added_now = False
+        if not cand.exists:
+            # The release search needs the title in Radarr/Sonarr – add it unmonitored, it is only
+            # monitored once a release is picked (otherwise removed again when the list expires)
+            if self._limit_reached(cmd, cand.key):
+                return
+            try:
+                cand.item = dict(cand.item, **cand.client.add(cand.item, search=False, monitored=False))
+            except ArrError as exc:
+                self._add_failed(cmd, cand, exc)
+                return
+            added_now = True
+            if not cand.is_movie:
+                cand.client.wait_for_episodes(_to_int(cand.item.get("id")) or 0)
+        self._offer(Selection(cmd, cand, seasons=[season] if season is not None else [], added_now=added_now))
 
     def _search_releases(self, cmd: Command, cand: Candidate, season: int | None,
                          episode_id: int | None = None) -> list[dict] | None:
@@ -2165,47 +2220,163 @@ class RequestService:
             self._reply(cmd, exc.user_msg)
             return None
 
-    def _show_releases(self, cmd: Command, cand: Candidate, season: int | None) -> None:
-        releases = self._search_releases(cmd, cand, season)
-        if releases is None:
-            return
-        admin = self._is_admin(cmd)
-        visible = [r for r in releases if admin or r.get("approved")]
-        if not visible:
-            hidden = len(releases) - len(visible)
+    # -- Release selection (mandatory for !request) ------------------------------------------ #
+    def _offer(self, sel: Selection) -> None:
+        """Show the next release list of a selection – nothing is downloaded until the user picks one.
+        Shows: season packs only, one list per season, one after another. Members only see releases
+        that match the quality profile. No matching release (mandatory): monitor, so Radarr/Sonarr
+        download it on their own as soon as one shows up."""
+        cmd, cand = sel.cmd, sel.cand
+        while True:
+            if not cand.is_movie:
+                if not sel.seasons:
+                    self._close(sel)
+                    return
+                sel.season = sel.seasons.pop(0)
+            releases = self._search_releases(cmd, cand, sel.season)
+            if releases is None:
+                self._close(sel)
+                return
+            packs = [r for r in releases if cand.is_movie or r.get("fullSeason")]
+            visible = [r for r in packs if self._is_admin(cmd) or r.get("approved")]
+            if visible:
+                self._present(sel, visible)
+                return
+            hidden = len(packs)
             extra = t("no_releases_hidden", count=hidden) if hidden else ""
-            self._reply(cmd, t("no_releases", label=cand.label(), extra=extra))
-            return
-        shown = visible[:max(RELEASES_SHOWN, 1)]
-        self._release_lists[cmd.sender] = (time.time() + SELECTION_TTL_SECONDS, cand, shown)
-        season_txt = t("season_suffix", n=season) if season is not None else ""
-        lines = [t("releases_header", label=cand.label(), season=season_txt)]
-        lines += [_release_lines(i, r) for i, r in enumerate(shown, 1)]
-        more = len(visible) - len(shown)
-        lines += ["", t("grab_hint", minutes=SELECTION_TTL_SECONDS // 60)
+            what = cand.label() + (t("season_suffix", n=sel.season) if sel.season is not None else "")
+            if not sel.mandatory:
+                self._reply(cmd, t("no_releases", label=what, extra=extra))
+                self._close(sel)
+                return
+            if not self._monitor_later(sel, what, extra):
+                self._close(sel)
+                return
+            if cand.is_movie:
+                self._close(sel)
+                return
+
+    def _monitor_later(self, sel: Selection, what: str, extra: str) -> bool:
+        """No matching release right now: monitor (+ search), Radarr/Sonarr then download it later."""
+        cmd, cand = sel.cmd, sel.cand
+        item_id = _to_int(cand.item.get("id")) or 0
+        try:
+            if cand.is_movie:
+                cand.client.monitor_movie(item_id)
+            else:
+                cand.client.monitor_seasons(item_id, {sel.season or 0}, search=True)
+        except ArrError as exc:
+            self._reply(cmd, exc.user_msg)
+            return False
+        self._commit(cmd, sel)
+        log.info("No matching release, monitored for later by %s: %s", _mask_number(cmd.sender), what)
+        hint = _release_hint(cand.item) if cand.is_movie else ""
+        self._reply(cmd, t("auto_later", what=what, extra=extra, arr=cand.client.name,
+                           where=t("here") if cmd.in_group else t("in_group"), hint=hint), poster=cand.poster())
+        return True
+
+    def _present(self, sel: Selection, visible: list[dict], header: str = "") -> None:
+        cand = sel.cand
+        sel.releases = visible[:max(RELEASES_SHOWN, 1)]
+        sel.expires = time.time() + SELECTION_TTL_SECONDS
+        self._store_selection(sel)
+        season_txt = t("season_suffix", n=sel.season) if sel.season is not None and not sel.episode_id else ""
+        lines = [header or t("releases_header", label=cand.label(), season=season_txt)]
+        lines += [_release_lines(i, r) for i, r in enumerate(sel.releases, 1)]
+        more = len(visible) - len(sel.releases)
+        lines += ["", t("grab_hint", minutes=SELECTION_TTL_SECONDS // 60 or 1)
                   + (t("more_not_shown", count=more) if more > 0 else "")]
-        self._reply(cmd, "\n".join(lines))
+        if sel.mandatory or sel.added_now:
+            lines.append(t("pick_hint"))
+        self._reply(sel.cmd, "\n".join(lines))
+
+    def _store_selection(self, sel: Selection) -> None:
+        """A new list replaces the sender's open one. Its unpicked title is removed again – unless it
+        is the same title (e.g. "!releases" again), then the new list takes over the cleanup."""
+        old = self._release_lists.get(sel.cmd.sender)
+        if old is not None and old is not sel and not old.committed:
+            if old.cand.key == sel.cand.key:
+                sel.added_now = sel.added_now or old.added_now
+            else:
+                self._remove_unpicked(old)
+        self._release_lists[sel.cmd.sender] = sel
+
+    def _commit(self, cmd: Command, sel: Selection) -> None:
+        """Something was grabbed or monitored: the title stays and counts towards the daily limit."""
+        if not sel.committed:
+            self._count(cmd, sel.cand)
+        sel.committed = True
+
+    def _close(self, sel: Selection) -> None:
+        """No further list for this selection: if nothing was picked, remove a title the bot added."""
+        if self._release_lists.get(sel.cmd.sender) is sel:
+            del self._release_lists[sel.cmd.sender]
+        if not sel.committed:
+            self._remove_unpicked(sel)
+
+    def _remove_unpicked(self, sel: Selection) -> bool:
+        """Remove a title the bot added for a release choice that nobody picked. Checks Radarr/Sonarr first:
+        if it is monitored or has files by now (another request, an admin), it stays."""
+        if not sel.added_now or sel.committed:
+            return False
+        sel.added_now = False
+        cand = sel.cand
+        item_id = _to_int(cand.item.get("id")) or 0
+        try:
+            current = cand.client.movie(item_id) if cand.is_movie else cand.client.series(item_id)
+        except ArrError as exc:
+            log.warning("Could not check %s before removing it: %s", cand.label(), exc.user_msg)
+            return False
+        files = _to_int(_dict(current.get("statistics")).get("episodeFileCount")) or 0
+        if current.get("monitored") or current.get("hasFile") or files:
+            return False
+        return self._rollback(cand, True)
+
+    def _expire_selections(self) -> None:
+        now = time.time()
+        for sel in [s for s in self._release_lists.values() if now > s.expires]:
+            self._expire(sel)
+
+    def _expire(self, sel: Selection) -> bool:
+        """Release list expired without a pick. Returns True if the user was told."""
+        if self._release_lists.get(sel.cmd.sender) is sel:
+            del self._release_lists[sel.cmd.sender]
+        removed = self._remove_unpicked(sel)
+        if not (sel.mandatory or removed):
+            return False
+        left = ([sel.season] if sel.season is not None else []) + sel.seasons
+        if len(left) > 1:
+            what = sel.cand.label() + " – " + t("what_many", numbers=", ".join(map(str, left)))
+        else:
+            what = sel.cand.label() + (t("season_suffix", n=left[0]) if left else "")
+        text = t("pick_expired", what=what)
+        if removed:
+            text += t("pick_expired_removed", label=sel.cand.label(), arr=sel.cand.client.name)
+        log.info("Release list expired without a pick: %s%s", what, " (title removed)" if removed else "")
+        self._reply(sel.cmd, text)
+        return True
 
     # -- !grab -------------------------------------------------------------------------- #
     def _cmd_grab(self, cmd: Command, args: str) -> None:
         if not args.isdigit():
             self._reply(cmd, t("grab_usage"))
             return
-        expires, cand, releases = self._release_lists.get(cmd.sender, (0.0, None, []))
+        sel = self._release_lists.get(cmd.sender)
         choice = int(args)
-        if not releases:
+        if sel is None or not sel.releases:
             self._reply(cmd, t("no_release_list"))
             return
-        if time.time() > expires:
-            self._release_lists.pop(cmd.sender, None)
-            self._reply(cmd, t("release_list_expired"))
+        if time.time() > sel.expires:
+            if not self._expire(sel):
+                self._reply(cmd, t("release_list_expired"))
             return
-        if not 1 <= choice <= len(releases):
-            self._reply(cmd, t("pick_range", count=len(releases)))
+        if not 1 <= choice <= len(sel.releases):
+            self._reply(cmd, t("pick_range", count=len(sel.releases)))
             return
-        self._grab(cmd, cand, releases[choice - 1])
+        self._grab(cmd, sel, sel.releases[choice - 1])
 
-    def _grab(self, cmd: Command, cand: Candidate, release: dict) -> bool:
+    def _grab(self, cmd: Command, sel: Selection, release: dict) -> bool:
+        cand = sel.cand
         title = _plain(_clean(release.get("title"), 120))
         if not release.get("approved") and not self._is_admin(cmd):
             self._reply(cmd, t("admin_only", title=title, reason=_plain(_rejection(release))))
@@ -2220,13 +2391,34 @@ class RequestService:
             else:
                 self._reply(cmd, exc.user_msg)
             return False
-        self._count(cmd, cand)
-        self._release_lists.pop(cmd.sender, None)
+        self._monitor_after_grab(sel)
+        self._commit(cmd, sel)
+        if self._release_lists.get(cmd.sender) is sel:
+            del self._release_lists[cmd.sender]
         log.info("Release grabbed by %s: %s (%s)", _mask_number(cmd.sender), title, cand.label())
         override = "" if release.get("approved") else t("admin_override")
         self._reply(cmd, t("downloading", title=title, label=cand.label(), override=override,
                            where=t("here") if cmd.in_group else t("in_group")))
+        if sel.seasons:   # "0 = all seasons": next season's list
+            sel.cmd = cmd
+            self._offer(sel)
         return True
+
+    @staticmethod
+    def _monitor_after_grab(sel: Selection) -> None:
+        """Monitor what was grabbed WITHOUT a new search (no second download) – so Radarr/Sonarr
+        import it, keep it and upgrade it within the profile."""
+        cand = sel.cand
+        item_id = _to_int(cand.item.get("id")) or 0
+        try:
+            if cand.is_movie:
+                cand.client.set_movie_monitored(item_id)
+            elif sel.episode_id:
+                cand.client.monitor_episodes(item_id, [sel.episode_id])
+            elif sel.season is not None:
+                cand.client.monitor_seasons(item_id, {sel.season}, search=False)
+        except ArrError as exc:
+            log.warning("Could not monitor %s after the grab: %s", cand.label(), exc.user_msg)
 
     # -- !release <release name> --------------------------------------------------------- #
     def _cmd_release(self, cmd: Command, args: str) -> None:
@@ -2299,14 +2491,19 @@ class RequestService:
             if not cand.exists:
                 if self._limit_reached(cmd, cand.key):
                     return
-                try:
-                    cand.item = dict(cand.item, **client.add(cand.item, search=False))
+                try:   # unmonitored until the release is grabbed
+                    cand.item = dict(cand.item, **client.add(cand.item, search=False, monitored=False))
                     added_now = True
                 except ArrError as exc:
                     self._reply(cmd, exc.user_msg)
                     return
             item_id = _to_int(cand.item.get("id")) or 0
+            if added_now and kind == "sonarr" and episode is None:
+                client.wait_for_episodes(item_id)
             episode_id = self._episode_id(client, name, season, episode) if episode is not None else None
+            # what gets monitored after the grab: the movie, the season (pack) or only this episode
+            sel = Selection(cmd, cand, season=season if episode is None else None, episode_id=episode_id,
+                            added_now=added_now)
             try:
                 releases = client.releases(item_id, season, episode_id)
             except ArrError as exc:
@@ -2324,8 +2521,8 @@ class RequestService:
             if release is not None:
                 self._last_title[cmd.sender] = (time.time() + 3600, cand)
                 if added_now:
-                    log.info("Added for !release without auto search: %s", cand.label())
-                if not self._grab(cmd, cand, release):
+                    log.info("Added for !release (unmonitored until grabbed): %s", cand.label())
+                if not self._grab(cmd, sel, release):
                     self._rollback(cand, added_now)
                 return
             # Not exactly there, but very similar releases (typo, other group/quality)?
@@ -2334,17 +2531,10 @@ class RequestService:
                              for norm_title, r in titles), key=lambda pair: pair[0], reverse=True)
             close = [r for score, r in scored if score >= 0.8 and (self._is_admin(cmd) or r.get("approved"))][:5]
             if close:
+                # A title added for this list stays unmonitored and uncounted: it counts once a release
+                # is grabbed and is removed again if nothing is picked (no limit bypass).
                 self._last_title[cmd.sender] = (time.time() + 3600, cand)
-                self._release_lists[cmd.sender] = (time.time() + SELECTION_TTL_SECONDS, cand, close)
-                lines = [t("similar_releases", name=_plain(name), label=cand.label())]
-                if added_now:
-                    # The title stays (needed for !grab) – so it must count towards the daily limit.
-                    # Before 0.9.1 it stayed monitored but uncounted (limit bypass).
-                    self._count(cmd, cand)
-                    lines.insert(0, t("kept_for_choice", label=cand.label(), arr=client.name))
-                lines += [_release_lines(i, r) for i, r in enumerate(close, 1)]
-                lines += ["", t("grab_hint", minutes=SELECTION_TTL_SECONDS // 60)]
-                self._reply(cmd, "\n".join(lines))
+                self._present(sel, close, header=t("similar_releases", name=_plain(name), label=cand.label()))
                 return
             tried.append(cand.label())
             self._rollback(cand, added_now)   # wrong title -> remove again, try the next candidate
@@ -2374,14 +2564,16 @@ class RequestService:
 
         return sorted(hits, key=rank)[:3]   # sorted() is stable: otherwise the search order applies
 
-    def _rollback(self, cand: Candidate, added_now: bool) -> None:
+    def _rollback(self, cand: Candidate, added_now: bool) -> bool:
         if not added_now:
-            return
+            return False
         try:
             cand.client.remove(_to_int(cand.item.get("id")) or 0)
-            log.info("Removed again (release not found): %s", cand.label())
+            log.info("Removed again (no release picked/found): %s", cand.label())
+            return True
         except ArrError as exc:
             log.warning("Could not remove %s again: %s", cand.label(), exc.user_msg)
+            return False
 
     @staticmethod
     def _episode_id(client: ArrClient, name: str, season: int, number: int | None) -> int | None:

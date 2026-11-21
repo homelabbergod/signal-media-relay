@@ -38,7 +38,7 @@ MEMBER, MEMBER2, OUTSIDER = "+4900000000011", "+4900000000012", "+4900000000099"
 MEMBER3, ADMIN = "+4900000000013", "+4900000000014"
 MEMBER4, MEMBER5, MEMBER6 = "+4900000000015", "+4900000000016", "+4900000000017"
 MEMBER7, MEMBER8, MEMBER9 = "+4900000000018", "+4900000000019", "+4900000000020"
-MEMBER10 = "+4900000000021"
+MEMBER10, MEMBER11, MEMBER12 = "+4900000000021", "+4900000000023", "+4900000000024"
 
 chat_in: "queue.Queue[dict | None]" = queue.Queue()         # messages pushed to the relay via WebSocket
 sent: list[dict] = []                                       # what the relay sent to Signal
@@ -60,10 +60,13 @@ def fake_releases(query: dict) -> list[dict]:
     def rel(title, approved, size, quality, protocol="torrent", seeders=50, reason=""):
         return {"guid": f"guid-{title}", "indexerId": 3, "indexer": "TestIndexer", "title": title,
                 "size": size, "quality": {"quality": {"name": quality}}, "approved": approved,
-                "rejections": [] if approved else [reason], "protocol": protocol, "seeders": seeders}
+                "rejections": [] if approved else [reason], "protocol": protocol, "seeders": seeders,
+                "fullSeason": bool(re.search(r"\.S\d+\.", title))}
     if "movieId" in query:
         movie = library[int(query["movieId"][0])]
         base = f"{dotted(movie['title'])}.{movie['year']}"
+        if movie["title"] == "Future Movie":
+            return []                                  # not released yet -> nothing at the indexers
         if movie["title"] == "Green Meadow":
             return [rel("Gruene.Wiese.1985.German.1080p.BluRay.x264-GRP", True, 9 * GB, "Bluray-1080p")]
         return [rel(f"{base}.2160p.UHD.BluRay.x265-TERMiNAL", True, 30 * GB, "Bluray-2160p"),
@@ -77,7 +80,10 @@ def fake_releases(query: dict) -> list[dict]:
     if series["title"] == "The Big Coup":
         return [rel("Der.Grosse.Coup.S01.German.DL.1080p.WEB.x264-NTb", True, 25 * GB, "WEBDL-1080p")]
     base = f"{dotted(series['title'])}.S{season:02d}"
-    return [rel(f"{base}.1080p.WEB-DL-NTb", True, 20 * GB, "WEBDL-1080p"),
+    episode = rel(f"{base}E01.1080p.WEB-DL-NTb", True, 2 * GB, "WEBDL-1080p")   # single episode, no pack
+    if series["title"] == "Twin Seasons" and season == 3:
+        return [episode]                               # season still airing: no season pack yet
+    return [rel(f"{base}.1080p.WEB-DL-NTb", True, 20 * GB, "WEBDL-1080p"), episode,
             rel(f"{base}.480p.WEB-XYZ", False, 4 * GB, "WEBDL-480p", reason="WEBDL-480p is not wanted in profile")]
 
 
@@ -131,6 +137,8 @@ RADARR_LOOKUP = {
     "typo movie 2015": [{"title": "Typo Movie", "year": 2015, "tmdbId": 8012}],
     "count movie a": [{"title": "Count Movie A", "year": 2016, "tmdbId": 8013}],
     "count movie b": [{"title": "Count Movie B", "year": 2017, "tmdbId": 8014}],
+    "count movie c": [{"title": "Count Movie C", "year": 2018, "tmdbId": 8015}],
+    "expire movie": [{"title": "Expire Movie", "year": 2023, "tmdbId": 8016}],
     "future movie": [{"title": "Future Movie", "year": 2099, "tmdbId": 8011, "status": "announced",
                       "digitalRelease": "2099-05-01T00:00:00Z"}],
     # German release names: only the umlaut spelling finds the movie, under its original title
@@ -141,7 +149,10 @@ ORIGIN_SHOW = {"title": "Sample Show: Origins", "year": 2024, "tvdbId": 9002,
 SAMPLE_SHOW = {"title": "Sample Show", "year": 2022, "tvdbId": 9001,
              "seasons": [{"seasonNumber": 0, "monitored": False}, {"seasonNumber": 1, "monitored": False},
                          {"seasonNumber": 2, "monitored": False}]}
+TWIN_SHOW = {"title": "Twin Seasons", "year": 2021, "tvdbId": 9005,
+             "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}, {"seasonNumber": 3}]}
 SONARR_LOOKUP = {"sample movie": [ORIGIN_SHOW], "sample show origins": [ORIGIN_SHOW], "sample show": [SAMPLE_SHOW],
+                 "twin seasons": [TWIN_SHOW],
                  # first hit is the wrong show -> relay must roll it back and try the next one
                  "der grosse coup": [{"title": "Coup Show", "year": 2018, "tvdbId": 9003,
                                       "seasons": [{"seasonNumber": 1}]},
@@ -152,6 +163,7 @@ deletes: list[str] = []
 SEASON_STATS = {("Sample Show", 1): (9, 9), ("Sample Show", 2): (0, 10)}   # (files, total)
 puts: list[dict] = []
 commands: list[dict] = []
+episode_monitor: list[dict] = []
 
 
 def check(name: str, ok) -> None:
@@ -216,6 +228,10 @@ class Fake(BaseHTTPRequestHandler):
                 files, total = SEASON_STATS.get((show["title"], s["seasonNumber"]), (0, 1))
                 seasons.append(dict(s, statistics={"episodeFileCount": files, "totalEpisodeCount": total}))
             return self._json(200, dict(show, id=int(m.group(1)), seasons=seasons))
+        if sub == "/episode":
+            show = library.get(int(urllib.parse.parse_qs(path.query)["seriesId"][0]), {})
+            return self._json(200, [{"id": 600 + s["seasonNumber"], "seasonNumber": s["seasonNumber"]}
+                                    for s in show.get("seasons", [])])
         if sub == "/parse":
             return self._json(200, fake_parse(kind, urllib.parse.parse_qs(path.query)["title"][0]))
         if sub == "/release":
@@ -245,7 +261,9 @@ class Fake(BaseHTTPRequestHandler):
         new_id = 100 + len(library)
         library[new_id] = {"kind": kind, "title": body["title"], "year": body.get("year"),
                            "tmdbId": body.get("tmdbId"), "tvdbId": body.get("tvdbId"),
-                           "seasons": body.get("seasons", [])}
+                           "seasons": body.get("seasons", []), "monitored": body.get("monitored"),
+                           "hasFile": False, "status": body.get("status"),
+                           "digitalRelease": body.get("digitalRelease")}
         self._json(201, dict(body, id=new_id))
 
     def do_DELETE(self):
@@ -259,6 +277,9 @@ class Fake(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"null")
         if self._arr_auth() is None:
             return self._json(401, {"message": "Unauthorized"})
+        if self.path.endswith("/episode/monitor"):
+            episode_monitor.append(body)
+            return self._json(202, [])
         puts.append(body)
         item_id = int(self.path.rsplit("/", 1)[1])
         if "seasons" in body:
@@ -366,18 +387,28 @@ def main() -> int:
     try:
         check("relay connects to the Signal WebSocket", ws_connected.wait(15))
 
-        say("!request")
+        say("!request", sender=MEMBER9, name="Ida")   # not Anna: her flow below needs 6 commands (spam brake)
         r = expect_reply("How to request")
-        check("'!request' alone -> usage help, quoted", r and r.get("quote_author") == MEMBER
+        check("'!request' alone -> usage help, quoted", r and r.get("quote_author") == MEMBER9
               and r["recipients"] == [GROUP])
 
         say("!request Test Movie")
-        r = expect_reply("Requested:")
-        check("single exact match -> added directly, success reply", r and "Test Movie (2016)" in r["message"])
+        r = expect_reply("Releases for 🎬 Test Movie")
+        check("single exact match -> release list (mandatory pick), member sees only profile matches",
+              r and "1. Test.Movie.2016.2160p" in r["message"] and "720p" not in r["message"]
+              and "Nothing is downloaded until you pick" in r["message"])
         movie = next((b for k, b in added if k == "radarr" and b.get("tmdbId") == 8001), None)
-        check("Radarr add uses configured profile, root folder, search on",
+        check("Radarr add: configured profile/root folder, UNmonitored, no search",
               movie and movie["qualityProfileId"] == 6 and movie["rootFolderPath"] == "/movies"
-              and movie["addOptions"]["searchForMovie"] is True)
+              and movie["monitored"] is False and movie["addOptions"]["searchForMovie"] is False
+              and movie["addOptions"]["monitor"] == "none")
+        test_movie_id = next((k for k, v in library.items() if v.get("tmdbId") == 8001), 0)
+        say("!grab 2")
+        r = expect_reply("Downloading")
+        check("!grab after !request -> grabbed, movie monitored WITHOUT a new search",
+              r and any("1080p.BluRay.x264-SPARKS" in b["guid"] for _, b in grabs)
+              and library[test_movie_id]["monitored"] is True
+              and not any(test_movie_id in c.get("movieIds", []) for c in commands))
 
         say("!request NichtsDa", sender=MEMBER2, name="Chris")
         check("no results -> 'Nothing found'", expect_reply("Nothing found") is not None)
@@ -396,8 +427,11 @@ def main() -> int:
         check("ambiguous -> numbered list with movies and series",
               r and "1. 🎬 Sample Movie (2021)" in r["message"] and "📺 Sample Show: Origins (2024) – 1 season" in r["message"])
         say("!request 2")
-        expect_reply("Requested:")
-        check("'!request 2' adds the 2nd entry (Sample Movie 1984)", any(b.get("tmdbId") == 8004 for _, b in added))
+        r = expect_reply("Releases for 🎬 Sample Movie (1984)")
+        check("'!request 2' adds the 2nd entry (Sample Movie 1984) and lists its releases",
+              r and any(b.get("tmdbId") == 8004 for _, b in added))
+        say("!grab 1")
+        expect_reply("Downloading")
 
         say("!request Space Movie")
         check("daily limit (2) reached -> refused", expect_reply("limit 2") is not None)
@@ -435,12 +469,22 @@ def main() -> int:
               and "2. Season 2" in r["message"] and "Season 0" not in r["message"])
         check("season question: nothing added yet", not any(b.get("tvdbId") == 9001 for _, b in added))
         say("!request 2", **dora)
-        r = expect_reply("Requested:")
+        r = expect_reply("Releases for 📺 Sample Show (2022)** – Season 2")
         sev = next((b for k, b in added if b.get("tvdbId") == 9001), None)
         flags = {s["seasonNumber"]: s["monitored"] for s in sev["seasons"]} if sev else {}
-        check("'!request 2' -> only season 2 monitored (monitor=skip), search started",
-              r and "Sample Show (2022) – season 2" in r["message"] and flags == {0: False, 1: False, 2: True}
-              and sev["addOptions"]["monitor"] == "skip" and sev["addOptions"]["searchForMissingEpisodes"] is True)
+        check("'!request 2' -> show added with NOTHING monitored, no search",
+              sev and flags == {0: False, 1: False, 2: False} and sev["monitored"] is False
+              and sev["addOptions"]["monitor"] == "none" and sev["addOptions"]["searchForMissingEpisodes"] is False)
+        check("show release list: season packs only (no single episodes), profile matches only",
+              r and "Sample.Show.S02.1080p.WEB-DL-NTb" in r["message"] and "S02E01" not in r["message"]
+              and "480p" not in r["message"])
+        n_commands = len(commands)
+        say("!grab 1", **dora)
+        r = expect_reply("Downloading")
+        put = puts[-1] if puts else {}
+        check("!grab season pack -> only season 2 monitored via PUT, no new search",
+              r and {s["seasonNumber"]: s["monitored"] for s in put.get("seasons", [])} == {0: False, 1: False, 2: True}
+              and len(commands) == n_commands)
         say("!request Sample Show s1", **dora)
         check("existing show, season already complete -> 'already complete'",
               expect_reply("season 1 is already complete") is not None)
@@ -455,14 +499,33 @@ def main() -> int:
               r and "1. Season 1 (9 episodes) ✔️ available" in r["message"]
               and "2. Season 2 (10 episodes) ⏳ requested" in r["message"])
         say("!request 0", **erik)
-        r = expect_reply("Requested:")
-        put = puts[-1] if puts else {}
-        check("'!request 0' on existing show -> all seasons monitored via PUT + SeriesSearch",
-              r and "all seasons" in r["message"]
-              and {s["seasonNumber"]: s["monitored"] for s in put.get("seasons", [])} == {0: False, 1: True, 2: True}
-              and commands and commands[-1]["name"] == "SeriesSearch")
+        r = expect_reply("Releases for 📺 Sample Show (2022)** – Season 2")
+        check("'!request 0' on existing show -> complete season 1 skipped, list for season 2",
+              r is not None and not expect_reply("Season 1", timeout=1))
         check("series added only once (no duplicate POST)",
               sum(1 for _, b in added if b.get("tvdbId") == 9001) == 1)
+
+        # ---------------- shows: one list per season, one after another ----------------
+        lena = dict(sender=MEMBER11, name="Lena")
+        say("!request Twin Seasons", **lena)
+        expect_reply("which season")
+        say("!request 0", **lena)
+        r = expect_reply("Releases for 📺 Twin Seasons (2021)** – Season 1")
+        twin_id = next((k for k, v in library.items() if v.get("tvdbId") == 9005), 0)
+        check("'0 = all' -> first the list for season 1", r and "Twin.Seasons.S01.1080p" in r["message"])
+        say("!grab 1", **lena)
+        r1 = expect_reply("Downloading:** Twin.Seasons.S01")
+        r2 = expect_reply("Releases for 📺 Twin Seasons (2021)** – Season 2")
+        check("after the grab for season 1 -> list for season 2 follows", r1 and r2)
+        say("!grab 1", **lena)
+        expect_reply("Downloading:** Twin.Seasons.S02")
+        r = expect_reply("No matching release for 📺 Twin Seasons (2021) – Season 3")
+        flags = {s["seasonNumber"]: s.get("monitored") for s in library.get(twin_id, {}).get("seasons", [])}
+        check("season without a season pack -> monitored + SeasonSearch (Sonarr loads it later)",
+              r and "Sonarr will download it automatically" in r["message"] and flags == {1: True, 2: True, 3: True}
+              and any(c.get("name") == "SeasonSearch" and c.get("seriesId") == twin_id and c.get("seasonNumber") == 3
+                      for c in commands)
+              and not any(c.get("seriesId") == twin_id and c.get("seasonNumber") in (1, 2) for c in commands))
 
         # ---------------- !releases / !grab / !release ----------------
         carla = dict(sender=MEMBER3, name="Carla")
@@ -488,12 +551,12 @@ def main() -> int:
         r = expect_reply("Which season")
         check("series without season -> asks which season", r and "Available: 1" in r["message"])
         say("!releases s1", **carla)
-        expect_reply("(without automatic search)")
         r = expect_reply("Releases for 📺 Sample Show: Origins (2024)** – Season 1")
         origin_show = next((b for k, b in added if k == "sonarr" and b.get("tvdbId") == 9002), None)
-        check("!releases on a new show -> added WITHOUT auto search, then season list",
+        check("!releases on a new show -> added unmonitored WITHOUT search, then season-pack list",
               r and origin_show and origin_show["addOptions"]["searchForMissingEpisodes"] is False
-              and "Sample.Show.Origins.S01.1080p.WEB-DL-NTb" in r["message"])
+              and origin_show["monitored"] is False and "Sample.Show.Origins.S01.1080p.WEB-DL-NTb" in r["message"]
+              and "S01E01" not in r["message"] and "Nothing is downloaded until you pick" in r["message"])
 
         admin = dict(sender=ADMIN, name="Admin")
         say("!releases Test Movie", **admin)
@@ -505,8 +568,14 @@ def main() -> int:
         check("admin: may grab a rejected release", r and any("720p" in b["guid"] for _, b in grabs))
         say("!release Sample.Show.Origins.S01E02.1080p.WEB-DL-NTb", **admin)
         r = expect_reply("Downloading:** Sample.Show.Origins.S01E02")
+        origin_id = next((k for k, v in library.items() if v.get("tvdbId") == 9002), 0)
         check("!release with a single-episode name -> episode search + grab",
               r and any(b["guid"] == "guid-Sample.Show.Origins.S01E02.1080p.WEB-DL-NTb" for _, b in grabs))
+        check("... then only this episode monitored (show monitored, no season, no search)",
+              episode_monitor and episode_monitor[-1] == {"episodeIds": [502], "monitored": True}
+              and library.get(origin_id, {}).get("monitored") is True
+              and not any(s.get("monitored") for s in library.get(origin_id, {}).get("seasons", []))
+              and not any(c.get("seriesId") == origin_id for c in commands))
         say("!release Unknown.Movie.2020.1080p.WEB-DL-XYZ", **admin)
         r = expect_reply("can't find a movie/show")
         check("!release of an unknown title -> says nothing found (no '!request first' detour)",
@@ -516,8 +585,10 @@ def main() -> int:
         say("!release Space.Movie.2014.1080p.BluRay.x264-SPARKS", **admin)
         r = expect_reply("Downloading:** Space.Movie")
         inter = next((b for k, b in added if b.get("tmdbId") == 8006), None)
-        check("!release of a title not in the library -> added without auto search, then grabbed",
-              r and inter and inter["addOptions"]["searchForMovie"] is False)
+        space_id = next((k for k, v in library.items() if v.get("tmdbId") == 8006), 0)
+        check("!release of a title not in the library -> added unmonitored w/o search, grabbed, then monitored",
+              r and inter and inter["addOptions"]["searchForMovie"] is False and inter["monitored"] is False
+              and library.get(space_id, {}).get("monitored") is True)
 
         # ---------------- !release with German release names ----------------
         erik = dict(sender=MEMBER5, name="Erik")
@@ -542,13 +613,20 @@ def main() -> int:
         # ---------------- edge cases (0.8.0) ----------------
         g = dict(sender=MEMBER7, name="Gina")
         say("!request Forgotten", **g)
-        r = expect_reply("Requested:")
-        check("existing but UNmonitored movie -> monitored again + MoviesSearch (was: 'being searched')",
-              r and "active again" in r["message"] and library[8]["monitored"] is True
-              and any(c.get("name") == "MoviesSearch" and c.get("movieIds") == [8] for c in commands))
+        r = expect_reply("Releases for 🎬 Forgotten (2019)")
+        check("existing but UNmonitored movie -> release list, still unmonitored",
+              r and library[8]["monitored"] is False)
+        say("!grab 1", **g)
+        r = expect_reply("Downloading")
+        check("... !grab -> monitored without MoviesSearch",
+              r and library[8]["monitored"] is True and not any(c.get("movieIds") == [8] for c in commands))
         say("!request Future Movie", **g)
-        r = expect_reply("Requested:")
-        check("not yet released movie -> tells expected date", r and "expected from 2099-05-01" in r["message"])
+        r = expect_reply("No matching release for 🎬 Future Movie")
+        future_id = next((k for k, v in library.items() if v.get("tmdbId") == 8011), 0)
+        check("no release yet -> monitored + MoviesSearch, loads later, tells expected date",
+              r and "expected from 2099-05-01" in r["message"] and "Radarr will download it automatically" in r["message"]
+              and library.get(future_id, {}).get("monitored") is True
+              and any(c.get("name") == "MoviesSearch" and c.get("movieIds") == [future_id] for c in commands))
         say("!request", edit=True, **g)
         r = expect_reply("How to request")
         check("edited message (typo fixed) is processed, quoting the ORIGINAL message",
@@ -592,17 +670,29 @@ def main() -> int:
         check("release name with a typo -> list of similar releases to !grab",
               r and "1. Test.Movie.2016.1080p.BluRay.x264-SPARKS" in r["message"] and "!grab" in r["message"])
 
-        # ---------------- 0.9.1: "similar releases" must count towards the daily limit ----------------
+        # ---------------- unpicked titles: removed again, never counted, no limit bypass ----------------
         kai = dict(sender=MEMBER10, name="Kai")
         say("!release Typo.Movie.2015.1080p.BluRey.x264-SPARKS", **kai)
         r = expect_reply("doesn't exist like that", timeout=20)
-        check("!release typo on a NEW title -> similar list says the title was added",
-              r and "Typo Movie (2015) was added to Radarr so you can pick a release" in r["message"])
+        typo_id = next((k for k, v in library.items() if v.get("tmdbId") == 8012), 0)
+        check("!release typo on a NEW title -> similar list, title kept UNmonitored meanwhile",
+              r and "Nothing is downloaded until you pick" in r["message"]
+              and library.get(typo_id, {}).get("monitored") is False)
         say("!request Count Movie A", **kai)
-        check("2nd title still within the limit (2)", expect_reply("Requested:") is not None)
+        expect_reply("Releases for 🎬 Count Movie A")
+        check("a new list replaces the old one -> the unpicked title is removed again",
+              typo_id not in library and any(d.endswith(f"/movie/{typo_id}?deleteFiles=false&addImportExclusion=false")
+                                             for d in deletes))
+        say("!grab 1", **kai)
+        expect_reply("Downloading")
         say("!request Count Movie B", **kai)
-        check("3rd title refused -> the kept title from the similar list was counted (no limit bypass)",
-              expect_reply("limit 2") is not None and not any(b.get("tmdbId") == 8014 for _, b in added))
+        expect_reply("Releases for 🎬 Count Movie B")
+        say("!grab 1", **kai)
+        check("2nd picked title within the limit (2) – the removed one didn't count",
+              expect_reply("Downloading") is not None)
+        say("!request Count Movie C", **kai)
+        check("3rd title refused (limit counts picked titles)",
+              expect_reply("limit 2") is not None and not any(b.get("tmdbId") == 8015 for _, b in added))
 
         # Test Movie arrives -> announcement names the requester
         req = urllib.request.Request(
@@ -613,6 +703,29 @@ def main() -> int:
         urllib.request.urlopen(req, timeout=10).read()
         r = expect_reply("New movie:** Test Movie")
         check("announcement says who requested it", r and "Requested by Anna" in r["message"])
+    finally:
+        relay.terminate()        # first stop the relay, then end its WebSocket handler (no stray reconnect)
+        relay.wait(15)
+        chat_in.put(None)
+
+    # ---------------- expired release list (short list lifetime) ----------------
+    ws_connected.clear()
+    relay = subprocess.Popen([sys.executable, RELAY], env=dict(env, SELECTION_TTL_SECONDS="4"),
+                             stdout=log_file, stderr=log_file)
+    try:
+        check("relay (short list lifetime) connects", ws_connected.wait(15))
+        mia = dict(sender=MEMBER12, name="Mia")
+        say("!request Expire Movie", **mia)
+        expect_reply("Releases for 🎬 Expire Movie")
+        expire_id = next((k for k, v in library.items() if v.get("tmdbId") == 8016), 0)
+        r = expect_reply("No release picked for 🎬 Expire Movie", timeout=15)
+        check("no pick in time -> told, title removed again (no files deleted), nothing grabbed",
+              r and "was removed from Radarr again" in r["message"] and r.get("quote_author") == MEMBER12
+              and expire_id not in library
+              and any(d.endswith(f"/movie/{expire_id}?deleteFiles=false&addImportExclusion=false") for d in deletes)
+              and not any("Expire.Movie" in b["guid"] for _, b in grabs))
+        say("!grab 1", **mia)
+        check("!grab after expiry -> no open list", expect_reply("no open release list") is not None)
     finally:
         chat_in.put(None)
         relay.terminate()

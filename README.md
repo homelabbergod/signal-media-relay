@@ -1,6 +1,6 @@
 # Signal Media Relay
 
-**Version 0.9.2** · [Changelog](CHANGELOG.md) · [Releases](https://github.com/homelabbergod/signal-media-relay/releases) · [Source on GitHub](https://github.com/homelabbergod/signal-media-relay) · Docker image: [`homelabbergod/signal-media-relay`](https://hub.docker.com/r/homelabbergod/signal-media-relay)
+**Version 0.10.0** · [Changelog](CHANGELOG.md) · [Releases](https://github.com/homelabbergod/signal-media-relay/releases) · [Source on GitHub](https://github.com/homelabbergod/signal-media-relay) · Docker image: [`homelabbergod/signal-media-relay`](https://hub.docker.com/r/homelabbergod/signal-media-relay)
 
 Announces new movies and episodes from **Sonarr/Radarr** (or **Jellyfin**) in a **Signal group**. Group members can request movies and shows right from the chat.
 
@@ -95,14 +95,29 @@ Bot:  📺 Example Show (2022) – which season?
       1. Season 1 (9 episodes) ✔️ available
       2. Season 2 (10 episodes)
 Ben:  2                      (reply to the list, or: !request 2)
-Bot:  ✅ Requested: 📺 Example Show (2022) – season 2
+Bot:  📦 Releases for 📺 Example Show (2022) – Season 2:
+      1. Example.Show.S02.1080p.WEB-DL-GRP
+         WEBDL-1080p · 20.0 GB · 50 seeds · Indexer
+      Reply with “!grab <no.>” (valid for 10 min)
+      ℹ️ Nothing is downloaded until you pick a release.
+Ben:  !grab 1
+Bot:  ⬇️ Downloading: Example.Show.S02.1080p.WEB-DL-GRP
 ```
+
+**Picking a release is mandatory.** Nothing is downloaded until someone picks one, so Radarr/Sonarr never fetch a title twice.
+- The bot adds a new title **unmonitored**. After `!grab` it monitors exactly what was grabbed (the movie or the season), without starting another search.
+- Members only see releases that match the quality profile. Admins also see rejected ones, with the reason.
+- **Shows:** only whole seasons (season packs). With “0 = all seasons” the lists come one season after another. Single episodes work with `!release <release name>`.
+- **No matching release yet** (e.g. a movie that isn't out): the bot monitors the title, and Radarr/Sonarr download it as soon as a release shows up.
+- **Nothing picked within 10 minutes:** a title the bot added for the list is removed again (files are never deleted), and the bot says so.
+- A title only counts towards the daily limit once something was grabbed or monitored.
 
 | Command | What it does |
 |---|---|
-| `!request <title>` | Adds a movie, or asks which season for a show. Downloads follow your quality profile. Add a year or `s2` to be precise. |
-| `!releases <title>` → `!grab <no.>` | Pick a specific release from the indexers, like *Interactive Search* |
-| `!release <release name>` | Download exactly this release. The title is detected from the name, German release names included. |
+| `!request <title>` | Shows the matching releases of a movie, or asks which season for a show. Add a year or `s2` to be precise. |
+| `!grab <no.>` | Download a release from the bot's list |
+| `!releases <title>` | Release list only, like *Interactive Search* (shows: `!releases <title> s2`) |
+| `!release <release name>` | Download exactly this release, also a single episode. The title is detected from the name, German release names included. |
 | `!id` | Sends you your Signal ID privately, for the admin and allow lists |
 | `!help` / `!hilfe` | Help |
 
@@ -112,7 +127,7 @@ The bot replies to each request with a quote. You can also reply to a bot list w
 - a daily limit per person (`REQUEST_LIMIT_PER_DAY`, default 5 titles) and a spam brake
 - only group members can make requests, and DMs from strangers are ignored
 - members only get releases your quality profile accepts; `REQUEST_ADMINS` may override that and have no limit
-- the bot only adds titles and never deletes your files
+- the bot never deletes your files; it only removes titles it added itself for a list nobody picked from
 
 ## Configuration
 
@@ -127,6 +142,7 @@ All options are commented in [`docker-compose.yml`](docker-compose.yml) and in t
 | `REQUESTS_ENABLED` | `false` | Turn on chat requests |
 | `REQUEST_LIMIT_PER_DAY` | `5` | Titles per person per 24 h (`0` = unlimited) |
 | `REQUEST_ADMINS` | – | Numbers/UUIDs (from `!id`) with extra rights |
+| `SELECTION_TTL_SECONDS` | `600` | How long a bot list stays valid; an unpicked release list then removes its title again |
 
 Changes take effect with `docker compose up -d`. A plain `restart` keeps the old values.
 

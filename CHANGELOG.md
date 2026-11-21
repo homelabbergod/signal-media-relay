@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.10.0
+
+### Changed
+- **Picking a release is now mandatory for `!request`.** Before, Radarr/Sonarr started downloading right after the request. A user who then picked a specific release could end up with the title downloaded twice.
+  - `!request` adds a new title **unmonitored** and shows the release list. Nothing is downloaded until someone answers with `!grab <no.>`.
+  - After the grab, the bot monitors exactly what was grabbed (the movie, the season or, with `!release`, the single episode), **without** another search.
+  - Members only see releases that match the quality profile. Admins also see rejected ones.
+  - **Shows: whole seasons only.** The lists contain season packs only, also for `!releases`. With “0 = all seasons” one list per season follows after each grab. Single episodes are still possible with `!release <release name>`.
+  - **No matching release** (e.g. a movie that isn't out yet, or a season without a pack): the bot monitors the title or season and starts a search, so Radarr/Sonarr download it as soon as a release is available. The reply says so.
+  - **No pick within 10 minutes:** a title the bot added for the list is removed again (files are never deleted), and the bot tells the user. Before removing it, the bot checks that the title isn't monitored and has no files by now.
+  - Opening a new list replaces the old one; an unpicked title from the old list is removed as well.
+- **Daily limit:** a title counts once something was grabbed or monitored, not when it was added for a list. Unpicked titles never count, and they don't stay in the library, so this is no limit bypass.
+- **`!releases` and `!release`** also add new titles unmonitored and monitor them only after the grab.
+- **New setting `SELECTION_TTL_SECONDS`** (default 600): how long a bot list stays valid.
+- `!help` describes the new flow.
+
 ## 0.9.2
 
 ### Changed
