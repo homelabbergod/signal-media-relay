@@ -1,0 +1,42 @@
+name: Docker Hub description
+
+# Keeps the Docker Hub page in sync: short description (with the GitHub link) + README.
+# Needs the repository secret DOCKERHUB_DESCRIPTION_TOKEN: a Docker Hub access token with
+# "Read, Write, Delete" scope (Docker Hub requires that scope to edit descriptions).
+# It is a separate token on purpose – the release token (DOCKERHUB_TOKEN) stays "Read & Write".
+on:
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - .github/workflows/dockerhub-description.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  description:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check for the description token
+        id: token
+        env:
+          TOKEN: ${{ secrets.DOCKERHUB_DESCRIPTION_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::DOCKERHUB_DESCRIPTION_TOKEN is not set – skipping the Docker Hub description update"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        if: steps.token.outputs.present == 'true'
+        with:
+          username: homelabbergod
+          password: ${{ secrets.DOCKERHUB_DESCRIPTION_TOKEN }}
+          repository: homelabbergod/signal-media-relay
+          short-description: "Sonarr/Radarr/Jellyfin news and requests in Signal. github.com/homelabbergod/signal-media-relay"
+          readme-filepath: ./README.md
+          enable-url-completion: true

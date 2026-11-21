@@ -1,6 +1,6 @@
 # Signal Media Relay
 
-**Version 0.9.2** · [Changelog](CHANGELOG.md) · Docker image: [`homelabbergod/signal-media-relay`](https://hub.docker.com/r/homelabbergod/signal-media-relay)
+**Version 0.9.2** · [Changelog](CHANGELOG.md) · [Releases](https://github.com/homelabbergod/signal-media-relay/releases) · [Source on GitHub](https://github.com/homelabbergod/signal-media-relay) · Docker image: [`homelabbergod/signal-media-relay`](https://hub.docker.com/r/homelabbergod/signal-media-relay)
 
 Announces new movies and episodes from **Sonarr/Radarr** (or **Jellyfin**) in a **Signal group**. Group members can request movies and shows right from the chat.
 

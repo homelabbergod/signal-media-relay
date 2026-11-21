@@ -6,7 +6,10 @@ ARG VERSION=0.9.2
 LABEL org.opencontainers.image.title="signal-media-relay" \
       org.opencontainers.image.description="Announces new movies/episodes from Sonarr, Radarr or Jellyfin in a Signal group; !request from the chat" \
       org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.licenses="GPL-3.0"
+      org.opencontainers.image.licenses="GPL-3.0" \
+      org.opencontainers.image.source="https://github.com/homelabbergod/signal-media-relay" \
+      org.opencontainers.image.url="https://github.com/homelabbergod/signal-media-relay" \
+      org.opencontainers.image.documentation="https://github.com/homelabbergod/signal-media-relay#readme"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1

@@ -88,6 +88,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
+          fetch-depth: 0          # all tags, to find the previous release for the compare link
       - name: Create the GitHub release from the CHANGELOG entry (skipped if it exists)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -95,5 +96,9 @@ jobs:
           version="${TAG#v}"
           awk -v v="$version" '$0 ~ "^## "v {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md
           printf '\n### Docker\n```\ndocker pull %s:%s\n```\n' "$IMAGE" "$version" >> notes.md
+          prev="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          if [ -n "$prev" ]; then
+            printf '\n**Full changelog:** https://github.com/%s/compare/%s...%s\n' "$GITHUB_REPOSITORY" "$prev" "$TAG" >> notes.md
+          fi
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title "$version" --notes-file notes.md --latest
