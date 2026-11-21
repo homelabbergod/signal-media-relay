@@ -1,28 +1,39 @@
 name: Release
 
 # Push a tag like v0.9.1 -> tests, version check, image to Docker Hub (version + latest), GitHub release.
+# Can also be started by hand for an existing tag: Actions -> Release -> Run workflow (or
+# `gh workflow run release.yml -f tag=v0.9.1`), e.g. to (re)publish an image.
 # Needs the repository secret DOCKERHUB_TOKEN (a Docker Hub *access token*, not the password).
 # Without it, the image push is skipped with a warning and the GitHub release is still created.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, e.g. v0.9.1"
+        required: true
 
 permissions:
   contents: read
 
 env:
   IMAGE: homelabbergod/signal-media-relay
+  # tag push: the pushed tag; manual run: the tag given as input
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
       - name: Tag matches the version everywhere
-        run: python scripts/check_version.py "${GITHUB_REF_NAME}"
+        run: python scripts/check_version.py "$TAG"
       - run: python tests/smoketest.py
       - run: python tests/test_requests.py
 
@@ -31,9 +42,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
       - name: Version without the leading "v" (Docker tags are 0.9.1, not v0.9.1)
         id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
       - name: Check for Docker Hub token
         id: token
         env:
@@ -73,12 +86,14 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Create the GitHub release from the CHANGELOG entry
+        with:
+          ref: ${{ env.TAG }}
+      - name: Create the GitHub release from the CHANGELOG entry (skipped if it exists)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           awk -v v="$version" '$0 ~ "^## "v {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md
           printf '\n### Docker\n```\ndocker pull %s:%s\n```\n' "$IMAGE" "$version" >> notes.md
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$version" --notes-file notes.md --latest
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$version" --notes-file notes.md --latest
