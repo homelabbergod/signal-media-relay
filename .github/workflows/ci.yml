@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile (warnings are errors)
+        run: python -W error -m py_compile relay.py tests/smoketest.py tests/test_requests.py scripts/check_version.py
+      - name: Version consistency
+        run: python scripts/check_version.py
+      - name: Smoke test (announcements, security)
+        run: python tests/smoketest.py
+      - name: Request test (!request, !release, …)
+        run: python tests/test_requests.py
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build image (no push)
+        run: docker build -t signal-media-relay:ci .
+      - name: Image starts and reports healthy
+        run: |
+          group="group.$(printf 'ci-group' | base64)"
+          docker run -d --name relay-ci -p 127.0.0.1:18090:8090 --read-only --cap-drop=ALL \
+            -e SIGNAL_NUMBER=+4900000000 -e SIGNAL_RECIPIENT="$group" -e RELAY_TOKEN=ci-token-1234567890abcdef \
+            -e BOT_LANGUAGE=en signal-media-relay:ci
+          for i in $(seq 1 30); do curl -fs http://127.0.0.1:18090/health && exit 0; sleep 1; done
+          docker logs relay-ci; exit 1

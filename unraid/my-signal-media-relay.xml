@@ -3,19 +3,19 @@
   Unraid template for signal-media-relay.
   Installation: copy this file to /boot/config/plugins/dockerMan/templates-user/,
   then Docker -> Add Container -> Template: "signal-media-relay".
-  Network: the same custom Docker network as gluetun and signal-api (see README, section Unraid).
+  Network: the private network signal-net, shared only with signal-api (see README, section Unraid).
 -->
 <Container version="2">
   <Name>signal-media-relay</Name>
-  <Repository>homelabbergod/signal-media-relay:latest</Repository>
+  <Repository>homelabbergod/signal-media-relay:0.9.1</Repository>
   <Registry>https://hub.docker.com/r/homelabbergod/signal-media-relay</Registry>
-  <Network>bridge</Network>
+  <Network>signal-net</Network>
   <MyIP/>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
   <Support/>
   <Project/>
-  <Overview>Announces new movies and episodes from Sonarr/Radarr (or Jellyfin) in a Signal group. Optional: members can request movies/shows with !request, !release, !releases and !grab. Needs the container bbernhard/signal-cli-rest-api (MODE=json-rpc). Put the network on the custom Docker network of gluetun and signal-api – Radarr/Sonarr are then reachable at http://gluetun:7878 and http://gluetun:8989.</Overview>
+  <Overview>Announces new movies and episodes from Sonarr/Radarr (or Jellyfin) in a Signal group. Optional: members can request movies/shows with !request, !release, !releases and !grab. Needs the container bbernhard/signal-cli-rest-api (MODE=json-rpc). Network: the private network signal-net (create it once with: docker network create signal-net), shared only with the signal-api container. Radarr/Sonarr behind gluetun are reached via http://UNRAID-IP:7878 / :8989. Fixed version tag – update deliberately (see CHANGELOG).</Overview>
   <Category>MediaApp:Other Tools:</Category>
   <WebUI/>
   <TemplateURL/>
@@ -26,7 +26,7 @@
   <DateInstalled/>
   <DonateText/>
   <DonateLink/>
-  <Requires>bbernhard/signal-cli-rest-api with MODE=json-rpc in the same Docker network.</Requires>
+  <Requires>bbernhard/signal-cli-rest-api named signal-api, MODE=json-rpc, on the private network signal-net.</Requires>
 
   <!-- ===== Port ===== -->
   <Config Name="Webhook port" Target="8090" Default="8090" Mode="tcp" Description="Port for the webhooks from Sonarr/Radarr/Jellyfin. Not needed inside the same Docker network (http://signal-media-relay:8090). Never expose it unprotected to the internet." Type="Port" Display="always" Required="false" Mask="false">8090</Config>
@@ -56,9 +56,9 @@
 
   <!-- ===== !request ===== -->
   <Config Name="Enable !request" Target="REQUESTS_ENABLED" Default="false" Mode="" Description="Allow requests from the Signal group to Radarr/Sonarr (true/false)" Type="Variable" Display="always" Required="false" Mask="false">false</Config>
-  <Config Name="Radarr URL" Target="RADARR_URL" Default="" Mode="" Description="Radarr behind gluetun: http://gluetun:7878 (container name of gluetun). With a URL base e.g. http://gluetun:7878/radarr" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Radarr URL" Target="RADARR_URL" Default="" Mode="" Description="Radarr behind gluetun: http://UNRAID-IP:7878 (the port gluetun publishes). With a URL base e.g. http://UNRAID-IP:7878/radarr" Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="Radarr API key" Target="RADARR_API_KEY" Default="" Mode="" Description="Radarr: Settings -&gt; General -&gt; Security" Type="Variable" Display="always" Required="false" Mask="true"></Config>
-  <Config Name="Sonarr URL" Target="SONARR_URL" Default="" Mode="" Description="Sonarr behind gluetun: http://gluetun:8989" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="Sonarr URL" Target="SONARR_URL" Default="" Mode="" Description="Sonarr behind gluetun: http://UNRAID-IP:8989 (the port gluetun publishes)" Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="Sonarr API key" Target="SONARR_API_KEY" Default="" Mode="" Description="Sonarr: Settings -&gt; General -&gt; Security" Type="Variable" Display="always" Required="false" Mask="true"></Config>
   <Config Name="Admins" Target="REQUEST_ADMINS" Default="" Mode="" Description="Comma-separated numbers/UUIDs (get yours with !id): may grab releases the profile rejects, no daily limit" Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="Requests per day" Target="REQUEST_LIMIT_PER_DAY" Default="5" Mode="" Description="Titles per person and 24 h (0 = unlimited)" Type="Variable" Display="always" Required="false" Mask="false">5</Config>
@@ -75,6 +75,9 @@
   <Config Name="Commands per minute" Target="REQUEST_COMMANDS_PER_MINUTE" Default="6" Mode="" Description="Spam brake per person" Type="Variable" Display="advanced" Required="false" Mask="false">6</Config>
 
   <!-- ===== Technical ===== -->
+  <Config Name="Signal retry interval (s)" Target="SIGNAL_RETRY_INTERVAL" Default="60" Mode="" Description="If Signal is unreachable, retry messages every N seconds" Type="Variable" Display="advanced" Required="false" Mask="false">60</Config>
+  <Config Name="Signal retry window (s)" Target="SIGNAL_RETRY_WINDOW" Default="900" Mode="" Description="Give up on a message after this many seconds of Signal being unreachable" Type="Variable" Display="advanced" Required="false" Mask="false">900</Config>
+  <Config Name="Health grace (s)" Target="HEALTH_GRACE_SECONDS" Default="120" Mode="" Description="The container turns unhealthy after this long without Signal or the Signal receiver" Type="Variable" Display="advanced" Required="false" Mask="false">120</Config>
   <Config Name="Log level" Target="LOG_LEVEL" Default="INFO" Mode="" Description="DEBUG, INFO, WARNING, ERROR (DEBUG logs incoming payloads, token redacted)" Type="Variable" Display="advanced" Required="false" Mask="false">INFO</Config>
   <Config Name="Listen port (internal)" Target="LISTEN_PORT" Default="8090" Mode="" Description="Internal port – only change it if the container port above is changed as well" Type="Variable" Display="advanced-hide" Required="false" Mask="false">8090</Config>
   <Config Name="Listen host (internal)" Target="LISTEN_HOST" Default="0.0.0.0" Mode="" Description="Internal bind address" Type="Variable" Display="advanced-hide" Required="false" Mask="false">0.0.0.0</Config>

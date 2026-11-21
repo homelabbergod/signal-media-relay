@@ -27,7 +27,7 @@ Python standard library only, no dependencies.
 
 from __future__ import annotations
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 import base64
 import binascii
@@ -139,6 +139,11 @@ RELEASE_SEARCH_TIMEOUT = _env_int("RELEASE_SEARCH_TIMEOUT", 180)  # seconds for 
 REQUEST_MAX_AGE_SECONDS = 3600      # ignore older commands (e.g. delivered late after downtime)
 SELECTION_TTL_SECONDS = 600         # how long a result list is valid for "!request <no.>"
 COMMANDS_PER_MINUTE = _env_int("REQUEST_COMMANDS_PER_MINUTE", 6)   # spam brake per person
+# Signal unreachable: failed messages go to a "retry later" list instead of being dropped
+SIGNAL_RETRY_INTERVAL = _env_int("SIGNAL_RETRY_INTERVAL", 60)      # seconds between retries
+SIGNAL_RETRY_WINDOW = _env_int("SIGNAL_RETRY_WINDOW", 900)         # give up after this many seconds
+MAX_RETRY_MESSAGES = 50
+HEALTH_GRACE_SECONDS = _env_int("HEALTH_GRACE_SECONDS", 120)   # /health: unhealthy after this long without Signal
 MAX_WS_MESSAGE_BYTES = 4 * 1024 * 1024
 MAX_ARR_RESPONSE_BYTES = 16 * 1024 * 1024
 
@@ -266,6 +271,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "no_title_for": "🔍 I can't find a movie/show for “{title}”{year} in {arr}.",
         "searching_release": "🔎 Searching “{name}” at the indexers … (may take a while)",
         "similar_releases": "🔍 “{name}” doesn't exist like that – similar releases for {label}:",
+        "kept_for_choice": "➕ {label} was added to {arr} so you can pick a release (no search started).",
         "release_not_found": "🔍 The indexers don't have “{name}” (any more){checked}.",
         "checked": " (checked: {titles})",
         # Radarr/Sonarr errors
@@ -384,6 +390,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "no_title_for": "🔍 Zu „{title}“{year} finde ich in {arr} keinen Film/keine Serie.",
         "searching_release": "🔎 Suche „{name}“ bei den Indexern … (kann etwas dauern)",
         "similar_releases": "🔍 „{name}“ gibt es so nicht – ähnliche Releases für {label}:",
+        "kept_for_choice": "➕ {label} wurde zu {arr} hinzugefügt, damit du ein Release wählen kannst (keine Suche gestartet).",
         "release_not_found": "🔍 „{name}“ haben die Indexer nicht (mehr){checked}.",
         "checked": " (geprüft: {titles})",
         "arr_forbidden": "⚠️ {arr} verweigert den Zugriff (API-Key falsch?) – bitte Admin Bescheid geben.",
@@ -605,19 +612,32 @@ class Relay:
         self._seen: dict[str, float] = {}
         self._requested: dict[str, tuple[str, float]] = {}   # "movie:<tmdbId>"/"series:<tvdbId>" -> (name, time)
         self._outbox: "queue.Queue[OutgoingMessage]" = queue.Queue(maxsize=MAX_OUTBOX)
-        threading.Thread(target=self._sender_loop, name="signal-sender", daemon=True).start()
+        # (next try, give up at, message) – Signal temporarily unreachable
+        self._retry: list[tuple[float, float, OutgoingMessage]] = []
+        self.signal_failing_since: float | None = None   # for /health
+        self.last_sent: float = 0.0
+        self.sender_thread = threading.Thread(target=self._sender_loop, name="signal-sender", daemon=True)
+        self.sender_thread.start()
         # A single thread posts bundles that are due. Previously: one timer thread per show –
         # a large import (many shows at once) blew the container's pids_limit.
-        threading.Thread(target=self._flusher_loop, name="episode-flusher", daemon=True).start()
+        self.flusher_thread = threading.Thread(target=self._flusher_loop, name="episode-flusher", daemon=True)
+        self.flusher_thread.start()
 
     def _flusher_loop(self) -> None:
         while True:
             time.sleep(1)
-            now = time.time()
-            with self._lock:
-                due = [k for k, g in self._pending.items() if g.due <= now]
-            for key in due:
-                self._flush(key)
+            try:   # this thread must never die – otherwise episode bundles are never posted
+                now = time.time()
+                with self._lock:
+                    due = [k for k, g in self._pending.items() if g.due <= now]
+                for key in due:
+                    self._flush(key)
+            except Exception:  # noqa: BLE001
+                log.exception("Error in the episode flusher – continuing")
+
+    @property
+    def retry_count(self) -> int:
+        return len(self._retry)
 
     def _enqueue(self, msg: OutgoingMessage) -> None:
         try:
@@ -744,38 +764,106 @@ class Relay:
 
     def _sender_loop(self) -> None:
         while True:
-            msg = self._outbox.get()
-            try:
-                self._deliver(msg)
-            finally:
-                self._outbox.task_done()
+            try:   # this thread must never die – otherwise announcements stop silently
+                try:
+                    msg = self._outbox.get(timeout=5)
+                except queue.Empty:
+                    msg = None
+                if msg is not None:
+                    try:
+                        if self._deliver(msg, attempts=3) == "retry":
+                            self._schedule_retry(msg)
+                    finally:
+                        self._outbox.task_done()
+                self._run_due_retries()
+            except Exception:  # noqa: BLE001
+                log.exception("Error in the Signal sender – continuing")
 
-    @staticmethod
-    def _deliver(msg: OutgoingMessage) -> None:
-        for attempt in range(1, 5):
+    def _schedule_retry(self, msg: OutgoingMessage) -> None:
+        if len(self._retry) >= MAX_RETRY_MESSAGES:
+            log.error("Retry list full (%d) – message dropped: %s", MAX_RETRY_MESSAGES, msg.text.splitlines()[0])
+            return
+        now = time.time()
+        self._retry.append((now + SIGNAL_RETRY_INTERVAL, now + SIGNAL_RETRY_WINDOW, msg))
+        log.warning("Signal unreachable – will retry every %d s for up to %d min: %s",
+                    SIGNAL_RETRY_INTERVAL, SIGNAL_RETRY_WINDOW // 60, msg.text.splitlines()[0])
+
+    def _run_due_retries(self) -> None:
+        now = time.time()
+        due = [entry for entry in self._retry if entry[0] <= now]
+        for entry in due:
+            self._retry.remove(entry)
+            _, give_up_at, msg = entry
+            result = self._deliver(msg, attempts=1)
+            if result == "retry":
+                if time.time() >= give_up_at:
+                    log.error("Signal still unreachable after %d min – message dropped: %s",
+                              SIGNAL_RETRY_WINDOW // 60, msg.text.splitlines()[0])
+                else:
+                    self._retry.append((time.time() + SIGNAL_RETRY_INTERVAL, give_up_at, msg))
+                break   # Signal still down – don't hammer it with the rest of the list right now
+
+    def _deliver(self, msg: OutgoingMessage, attempts: int) -> str:
+        """Try to send. Returns "sent", "drop" (permanent error) or "retry" (temporary error)."""
+        for attempt in range(1, attempts + 1):
             try:
                 send_signal(msg)
+                self.signal_failing_since = None
+                self.last_sent = time.time()
                 log.info("Signal message sent: %s", msg.text.splitlines()[0])
-                return
+                return "sent"
             except urllib.error.HTTPError as exc:
-                detail = exc.read().decode("utf-8", "replace")[:500]
-                log.error("Signal API error %s (attempt %d/4): %s", exc.code, attempt, detail)
+                try:   # reading the error body can fail too (connection reset) – never let that escape
+                    detail = exc.read().decode("utf-8", "replace")[:500]
+                except Exception as read_exc:  # noqa: BLE001
+                    detail = f"(could not read error body: {read_exc})"
+                log.error("Signal API error %s (attempt %d/%d): %s", exc.code, attempt, attempts, detail)
                 if 400 <= exc.code < 500 and exc.code != 429:
                     if msg.quote:   # e.g. unknown quote author -> try again without the quote
                         log.warning("Sending with quote was rejected – retrying without quote")
                         msg.quote = None
-                        continue
+                        return self._deliver(msg, attempts)
                     log.error("Permanent error (configuration? check SIGNAL_NUMBER/SIGNAL_RECIPIENT) "
                               "– message dropped: %s", msg.text.splitlines()[0])
-                    return
-            except Exception as exc:  # noqa: BLE001
-                log.error("Sending to Signal failed (attempt %d/4): %s", attempt, exc)
-            if attempt < 4:
+                    return "drop"
+            except Exception as exc:  # noqa: BLE001 - connection errors, timeouts, broken responses
+                log.error("Sending to Signal failed (attempt %d/%d): %s", attempt, attempts, exc)
+            if self.signal_failing_since is None:
+                self.signal_failing_since = time.time()
+            if attempt < attempts:
                 time.sleep(2 ** attempt)
-        log.error("Message finally dropped: %s", msg.text.splitlines()[0])
+        return "retry"
 
 
 RELAY: Relay | None = None
+REQUESTS: "RequestService | None" = None
+
+
+def health_status() -> tuple[int, dict]:
+    """Honest health: 503 if a worker thread died, Signal has been unreachable for a while
+    or (with !request) the Signal receiver is disconnected. Docker/Unraid then show "unhealthy"."""
+    now = time.time()
+    problems: list[str] = []
+    body: dict = {"version": __version__}
+    if RELAY is not None:
+        body["sender"] = "running" if RELAY.sender_thread.is_alive() else "stopped"
+        body["flusher"] = "running" if RELAY.flusher_thread.is_alive() else "stopped"
+        body["signal"] = "failing" if RELAY.signal_failing_since else "ok"
+        body["pending_retries"] = RELAY.retry_count
+        if body["sender"] == "stopped":
+            problems.append("Signal sender thread stopped")
+        if body["flusher"] == "stopped":
+            problems.append("episode flusher thread stopped")
+        if RELAY.signal_failing_since and now - RELAY.signal_failing_since > HEALTH_GRACE_SECONDS:
+            problems.append(f"Signal API unreachable for {int(now - RELAY.signal_failing_since)} s")
+    if REQUESTS is not None:
+        body["receiver"] = "connected" if REQUESTS.receiver_connected else "disconnected"
+        if not REQUESTS.receiver_connected and now - REQUESTS.receiver_down_since > HEALTH_GRACE_SECONDS:
+            problems.append(f"Signal receiver disconnected for {int(now - REQUESTS.receiver_down_since)} s")
+    body["status"] = "unhealthy" if problems else "ok"
+    if problems:
+        body["problems"] = problems
+    return (503 if problems else 200), body
 
 
 # --------------------------------------------------------------------------- #
@@ -1428,6 +1516,10 @@ class RequestService:
         self._season_lists: dict[str, tuple[float, Candidate, list[int]]] = {}    # season question for shows
         self._release_lists: dict[str, tuple[float, Candidate, list[dict]]] = {}  # for "!grab <no.>"
         self._members: tuple[float, frozenset[str]] = (0.0, frozenset())
+        # _throttle runs on the receiver thread, _prune on the worker thread – they share these dicts
+        self._state_lock = threading.Lock()
+        self.receiver_connected = False
+        self.receiver_down_since = time.time()
 
     def start(self) -> None:
         for target, name in ((self._receiver_loop, "signal-receiver"), (self._worker_loop, "request-worker"),
@@ -1457,6 +1549,7 @@ class RequestService:
             try:
                 ws = WebSocketClient(self._receive_url(), timeout=30)
                 log.info("Signal receiver connected – waiting for !request")
+                self.receiver_connected = True
                 backoff = 2
                 while True:
                     raw = ws.recv()
@@ -1466,6 +1559,9 @@ class RequestService:
             except Exception as exc:  # noqa: BLE001 - receiving must keep running
                 log.warning("Signal receiver interrupted (%s) – retrying in %d s", exc, backoff)
             finally:
+                if self.receiver_connected:
+                    self.receiver_connected = False
+                    self.receiver_down_since = time.time()
                 if ws:
                     ws.close()
             time.sleep(backoff)
@@ -1549,16 +1645,20 @@ class RequestService:
 
     def _throttle(self, cmd: Command) -> bool:
         now = time.time()
-        recent = [ts for ts in self._recent.get(cmd.sender, []) if now - ts < 60]
-        if len(recent) >= COMMANDS_PER_MINUTE:
-            log.warning("Spam brake: command from %s ignored", _mask_number(cmd.sender))
-            if now - self._warned.get(cmd.sender, 0) > 60:     # only notify once per minute
-                self._warned[cmd.sender] = now
-                self._reply(cmd, t("slow_down"))
-            return False
-        recent.append(now)
-        self._recent[cmd.sender] = recent
-        return True
+        with self._state_lock:   # shared with _prune on the worker thread
+            recent = [ts for ts in self._recent.get(cmd.sender, []) if now - ts < 60]
+            if len(recent) >= COMMANDS_PER_MINUTE:
+                warn = now - self._warned.get(cmd.sender, 0) > 60     # only notify once per minute
+                if warn:
+                    self._warned[cmd.sender] = now
+            else:
+                recent.append(now)
+                self._recent[cmd.sender] = recent
+                return True
+        log.warning("Spam brake: command from %s ignored", _mask_number(cmd.sender))
+        if warn:
+            self._reply(cmd, t("slow_down"))
+        return False
 
     # -- Processing ----------------------------------------------------------------- #
     def _prune(self) -> None:
@@ -1568,12 +1668,13 @@ class RequestService:
         for store in (self._pending, self._last_title, self._season_lists, self._release_lists):
             for key in [k for k, v in store.items() if v[0] < now - 3600]:
                 del store[key]
-        for key in [k for k, v in self._recent.items() if not v or now - v[-1] > 60]:
-            del self._recent[key]
+        with self._state_lock:   # _recent/_warned are written by _throttle on the receiver thread
+            for key in [k for k, v in self._recent.items() if not v or now - v[-1] > 60]:
+                del self._recent[key]
+            for key in [k for k, ts in self._warned.items() if now - ts > 60]:
+                del self._warned[key]
         for key in [k for k, v in self._adds.items() if not v or now - v[-1][0] > 86400]:
             del self._adds[key]
-        for key in [k for k, ts in self._warned.items() if now - ts > 60]:
-            del self._warned[key]
 
     def _worker_loop(self) -> None:
         while True:
@@ -2126,6 +2227,11 @@ class RequestService:
                 self._last_title[cmd.sender] = (time.time() + 3600, cand)
                 self._release_lists[cmd.sender] = (time.time() + SELECTION_TTL_SECONDS, cand, close)
                 lines = [t("similar_releases", name=_plain(name), label=cand.label())]
+                if added_now:
+                    # The title stays (needed for !grab) – so it must count towards the daily limit.
+                    # Before 0.9.1 it stayed monitored but uncounted (limit bypass).
+                    self._count(cmd, cand)
+                    lines.insert(0, t("kept_for_choice", label=cand.label(), arr=client.name))
                 lines += [_release_lines(i, r) for i, r in enumerate(close, 1)]
                 lines += ["", t("grab_hint", minutes=SELECTION_TTL_SECONDS // 60)]
                 self._reply(cmd, "\n".join(lines))
@@ -2243,7 +2349,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path.rstrip("/")
         if path == "/health":
-            self._reply(200, {"status": "ok", "version": __version__})
+            self._reply(*health_status())
         else:
             self._reply(404, {"error": "not found"})
 
@@ -2309,7 +2415,10 @@ def validate_config() -> list[str]:
                                    ("AGGREGATE_SECONDS", AGGREGATE_SECONDS, 0, 3600),
                                    ("RELEASES_SHOWN", RELEASES_SHOWN, 1, 20),
                                    ("RELEASE_SEARCH_TIMEOUT", RELEASE_SEARCH_TIMEOUT, 10, 900),
-                                   ("REQUEST_COMMANDS_PER_MINUTE", COMMANDS_PER_MINUTE, 1, 60)):
+                                   ("REQUEST_COMMANDS_PER_MINUTE", COMMANDS_PER_MINUTE, 1, 60),
+                                   ("SIGNAL_RETRY_INTERVAL", SIGNAL_RETRY_INTERVAL, 1, 600),
+                                   ("SIGNAL_RETRY_WINDOW", SIGNAL_RETRY_WINDOW, 0, 86400),
+                                   ("HEALTH_GRACE_SECONDS", HEALTH_GRACE_SECONDS, 1, 3600)):
         if not low <= value <= high:
             problems.append(f"{name} must be between {low} and {high} (is {value})")
     if REQUESTS_ENABLED:
@@ -2325,7 +2434,7 @@ def validate_config() -> list[str]:
 
 
 def main() -> None:
-    global RELAY
+    global RELAY, REQUESTS
     missing = [n for n, v in (("SIGNAL_NUMBER", SIGNAL_NUMBER), ("SIGNAL_RECIPIENT", SIGNAL_RECIPIENT)) if not v]
     if missing:
         sys.exit(f"Configuration error: missing variables: {', '.join(missing)}")
@@ -2353,9 +2462,15 @@ def main() -> None:
             log.warning("SIGNAL_RECIPIENT is not a group – !request is only accepted via direct message "
                         "from the recipient")
 
+    if not _env("BOT_LANGUAGE"):
+        # 0.9.0 changed the default from German to English – existing installs would switch silently
+        log.warning("BOT_LANGUAGE is not set – bot messages are in English. "
+                    "Set BOT_LANGUAGE=de for German (the default changed in 0.9.0).")
+
     RELAY = Relay()
     if REQUESTS_ENABLED:
-        RequestService(RELAY).start()
+        REQUESTS = RequestService(RELAY)
+        REQUESTS.start()
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     log.info("Signal Media Relay %s listening on %s:%d -> %s (recipient %s, language %s)",
              __version__, LISTEN_HOST, LISTEN_PORT, SIGNAL_API_URL, _mask_number(SIGNAL_RECIPIENT), BOT_LANGUAGE)
@@ -2367,6 +2482,8 @@ def main() -> None:
         log.info("Shutting down – sending pending announcements …")
         RELAY.flush_all()
         RELAY.wait_until_sent(timeout=20)
+        if RELAY.retry_count:
+            log.warning("%d message(s) waiting for Signal are lost on shutdown", RELAY.retry_count)
         server.server_close()
 
 

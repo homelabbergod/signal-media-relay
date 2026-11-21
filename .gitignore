@@ -1,3 +1,4 @@
 .env
 signal-cli-config/
 __pycache__/
+MAINTAINER.md

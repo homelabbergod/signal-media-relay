@@ -11,8 +11,12 @@ services:
       - ./signal-cli-config:/home/.local/share/signal-cli
     ports:
       # The API has NO authentication: only publish locally (for the QR code / group ID).
-      # After setup this block can be removed completely.
+      # After setup, remove this block completely.
       - "127.0.0.1:8080:8080"
+    networks:
+      - signal-net               # private: only the relay can reach the unauthenticated API
+    pids_limit: 512              # measured ~160 threads (Java)
+    mem_limit: 1g                # measured ~400 MB
     # Note: NO "no-new-privileges" – the image starts via s6-overlay (setuid) and
     # aborts at startup with it (tested with 0.101).
 
@@ -86,3 +90,11 @@ services:
     pids_limit: 64
     mem_limit: 128m
     stop_grace_period: 30s
+    networks:
+      - signal-net
+
+# signal-api has no authentication and holds the Signal account's keys. Keep it on a private
+# network that only the relay joins – never put it on a shared network (e.g. gluetun's).
+networks:
+  signal-net:
+    name: signal-net

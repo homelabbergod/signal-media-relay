@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.1
+
+Result of a review with three perspectives (developer, DevSecOps, user). This release prepares the move to Unraid.
+
+### Fixed
+- **Announcements could stop silently:** one broken error response from the Signal API (connection dropped while reading it) killed the only sender thread. Every later message was lost while `/health` still said "ok". In a test against 0.9.0, only 15 of 90 messages arrived. Both background threads now survive any error.
+- **`!release` limit bypass:** when the exact release wasn't found but similar ones were, the title stayed in Radarr/Sonarr (monitored) without counting towards the daily limit. It now counts, and the reply says the title was added.
+- **Rare thread race** between the spam brake and the cleanup turned a command into "internal error". These now share a lock.
+
+### Changed
+- **Signal unreachable:** messages are no longer dropped after ~14 s. After 3 quick attempts they go into a retry list, retried every `SIGNAL_RETRY_INTERVAL` (60 s) for up to `SIGNAL_RETRY_WINDOW` (15 min). Permanent errors (wrong number/group) are still dropped right away.
+- **Honest `/health`:** it returns **503** with a `problems` list when a background thread stopped, the Signal API has been unreachable for longer than `HEALTH_GRACE_SECONDS` (120 s), or the Signal receiver is disconnected. Docker/Unraid show the container as *unhealthy*.
+- **Startup warning when `BOT_LANGUAGE` is not set:** 0.9.0 changed the default to English, and the warning avoids a silent language switch on upgrade.
+- **Unraid template pinned to a version** (`:0.9.1` instead of `:latest`). Updates are deliberate.
+- **signal-api isolated on a private network `signal-net`** shared only with the relay (compose and the Unraid guide). It has no authentication, so no other container may reach it. Resource limits were added (1 GB RAM, 512 PIDs; measured ~400 MB / ~160).
+- **New Unraid walkthrough** in the README: browser-only setup, private network, gluetun firewall note, updating.
+- **CI on GitHub Actions:** tests on Python 3.12 and 3.14, a version consistency check (`scripts/check_version.py`) and a test build of the image. Pushing a `v*` tag builds and pushes the image (with provenance and SBOM) and creates the GitHub release. Actions are pinned to commit SHAs.
+
 ## 0.9.0
 
 ### Changed

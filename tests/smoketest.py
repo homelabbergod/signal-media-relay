@@ -30,6 +30,7 @@ JELLYFIN_ID = "0123456789abcdef0123456789abcdef"
 
 sent_to_signal: list[dict] = []          # bodies the relay POSTed to /v2/send
 fetched: list[tuple[str, dict]] = []     # (path, headers) of every GET the relay made
+flaky_attempts: list[float] = []         # send attempts for the "FLAKY" message
 failures: list[str] = []
 
 
@@ -70,7 +71,25 @@ class FakeUpstream(BaseHTTPRequestHandler):
         self.wfile.write(b"\x89PNG-fake")
 
     def do_POST(self):
-        sent_to_signal.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        text = body.get("message", "")
+        if "BREAK-READ" in text:
+            # error response whose body breaks off – reading it raises inside the relay.
+            # Before 0.9.1 this killed the only sender thread and all announcements stopped.
+            self.send_response(500)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            self.wfile.write(b"bro")
+            self.close_connection = True
+            return
+        if "FLAKY" in text:
+            flaky_attempts.append(time.time())
+            if len(flaky_attempts) <= 4:           # Signal "down" for the first 4 attempts
+                self.send_response(503)
+                self.end_headers()
+                self.wfile.write(b'{"error": "temporarily unavailable"}')
+                return
+        sent_to_signal.append(body)
         self.send_response(201)
         self.end_headers()
         self.wfile.write(b"{}")
@@ -85,7 +104,8 @@ def main() -> int:
     env = dict(os.environ, SIGNAL_API_URL=upstream, SIGNAL_NUMBER="+4900000000", SIGNAL_RECIPIENT=GROUP,
                LISTEN_HOST="127.0.0.1", LISTEN_PORT=str(relay_port), AGGREGATE_SECONDS="1",
                ANNOUNCE_TESTS="true", SEND_POSTERS="true", POSTER_ALLOWED_HOSTS="127.0.0.1",
-               JELLYFIN_URL=upstream, JELLYFIN_API_KEY="jfkey", PYTHONIOENCODING="utf-8")
+               JELLYFIN_URL=upstream, JELLYFIN_API_KEY="jfkey", PYTHONIOENCODING="utf-8",
+               SIGNAL_RETRY_INTERVAL="1", SIGNAL_RETRY_WINDOW="8")
 
     # 1) Startup refuses insecure configuration
     for token, label in (("", "missing"), ("change-me", "placeholder"), ("short", "too short")):
@@ -165,12 +185,21 @@ def main() -> int:
         many = [post("/sonarr", {"eventType": "Download", "series": {"title": f"Show {n}"},
                                  "episodes": [{"seasonNumber": 1, "episodeNumber": 1, "title": "Pilot"}]}, auth)
                 for n in range(70)]                                              # large import
+        # 0.9.1: a broken Signal error response must not kill the sender; a flaky Signal is retried
+        post("/radarr", movie("BREAK-READ Movie", 2011, ""), auth)
+        post("/radarr", movie("After Break", 2012, ""), auth)
+        post("/radarr", movie("FLAKY Movie", 2013, ""), auth)
 
-        expected = 3 + 7 + 1 + 2 + 3 + 70   # 3 test pings, 7 announcements above, 1 bundled episode message
-        deadline = time.time() + 30
+        expected = 3 + 7 + 1 + 2 + 3 + 70 + 2   # 3 test pings, 7 announcements, 1 bundle, ... + After Break, FLAKY
+        deadline = time.time() + 60
         while len(sent_to_signal) < expected and time.time() < deadline:
             time.sleep(0.2)
         time.sleep(1.5)   # give a wrongly-sent duplicate the chance to show up
+        try:
+            health_after = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{relay_port}/health",
+                                                             timeout=5).read())
+        except urllib.error.HTTPError as exc:   # 503 = unhealthy, still has a JSON body
+            health_after = json.loads(exc.read())
     finally:
         relay.terminate()
         relay.wait(15)
@@ -217,6 +246,44 @@ def main() -> int:
           all(code == 200 for code in many)
           and sum(1 for m in sent_to_signal if re.search(r":\*\* Show \d+ – ", m["message"])) == 70)
     check("default bot language is English", bool(message("New movie") and not message("Neuer Film")))
+    check("warning in the log when BOT_LANGUAGE is not set (0.9.0 changed the default)",
+          "BOT_LANGUAGE is not set" in log_text)
+    check("broken Signal error response does not kill the sender (later messages still arrive)",
+          bool(message("After Break")) and not message("BREAK-READ"))
+    check("Signal down for 4 attempts -> message kept in the retry list and delivered later",
+          bool(message("FLAKY Movie")) and len(flaky_attempts) >= 5)
+    check("/health reports running sender/flusher", health_after.get("status") == "ok"
+          and health_after.get("sender") == "running" and health_after.get("flusher") == "running")
+
+    # 7b) Signal unreachable -> /health turns 503 after the grace period
+    dead_port, hp = free_port(), free_port()
+    unhealthy = subprocess.Popen([sys.executable, RELAY], env=dict(
+        env, RELAY_TOKEN=TOKEN, LISTEN_PORT=str(hp), SIGNAL_API_URL=f"http://127.0.0.1:{dead_port}",
+        HEALTH_GRACE_SECONDS="1", BOT_LANGUAGE="en"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    health_code, health_body = 0, {}
+    try:
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{hp}/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{hp}/radarr", data=json.dumps(movie("Nobody Hears", 2020, "")).encode(),
+            method="POST", headers={"Content-Type": "application/json", "X-Relay-Token": TOKEN}), timeout=10).read()
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{hp}/health", timeout=2)
+            except urllib.error.HTTPError as exc:
+                health_code, health_body = exc.code, json.loads(exc.read())
+                break
+            time.sleep(0.5)
+    finally:
+        unhealthy.terminate()
+        unhealthy.wait(15)
+    check("Signal unreachable -> /health returns 503 with the reason",
+          health_code == 503 and any("Signal API unreachable" in p for p in health_body.get("problems", [])))
 
     # 7) BOT_LANGUAGE=de: same relay, German texts
     de_port = free_port()

@@ -38,6 +38,7 @@ MEMBER, MEMBER2, OUTSIDER = "+4911111111", "+4912121212", "+4999999999"
 MEMBER3, ADMIN = "+4913131313", "+4914141414"
 MEMBER4, MEMBER5, MEMBER6 = "+4915151515", "+4916161616", "+4917171717"
 MEMBER7, MEMBER8, MEMBER9 = "+4918181818", "+4919191919", "+4920202020"
+MEMBER10 = "+4921212121"
 
 chat_in: "queue.Queue[dict | None]" = queue.Queue()         # messages pushed to the relay via WebSocket
 sent: list[dict] = []                                       # what the relay sent to Signal
@@ -126,6 +127,10 @@ RADARR_LOOKUP = {
     "space movie 2014": [{"title": "Space Movie", "year": 2014, "tmdbId": 8006}],
     "unknown movie 2020": [],
     "forgotten": [{"title": "Forgotten", "year": 2019, "tmdbId": 8009}],
+    # 0.9.1: limit bypass via the "similar releases" branch of !release
+    "typo movie 2015": [{"title": "Typo Movie", "year": 2015, "tmdbId": 8012}],
+    "count movie a": [{"title": "Count Movie A", "year": 2016, "tmdbId": 8013}],
+    "count movie b": [{"title": "Count Movie B", "year": 2017, "tmdbId": 8014}],
     "future movie": [{"title": "Future Movie", "year": 2099, "tmdbId": 8011, "status": "announced",
                       "digitalRelease": "2099-05-01T00:00:00Z"}],
     # German release names: only the umlaut spelling finds the movie, under its original title
@@ -586,6 +591,18 @@ def main() -> int:
         r = expect_reply("doesn't exist like that", timeout=20)
         check("release name with a typo -> list of similar releases to !grab",
               r and "1. Test.Movie.2016.1080p.BluRay.x264-SPARKS" in r["message"] and "!grab" in r["message"])
+
+        # ---------------- 0.9.1: "similar releases" must count towards the daily limit ----------------
+        kai = dict(sender=MEMBER10, name="Kai")
+        say("!release Typo.Movie.2015.1080p.BluRey.x264-SPARKS", **kai)
+        r = expect_reply("doesn't exist like that", timeout=20)
+        check("!release typo on a NEW title -> similar list says the title was added",
+              r and "Typo Movie (2015) was added to Radarr so you can pick a release" in r["message"])
+        say("!request Count Movie A", **kai)
+        check("2nd title still within the limit (2)", expect_reply("Requested:") is not None)
+        say("!request Count Movie B", **kai)
+        check("3rd title refused -> the kept title from the similar list was counted (no limit bypass)",
+              expect_reply("limit 2") is not None and not any(b.get("tmdbId") == 8014 for _, b in added))
 
         # Test Movie arrives -> announcement names the requester
         req = urllib.request.Request(
