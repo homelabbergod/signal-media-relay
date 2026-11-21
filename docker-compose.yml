@@ -75,6 +75,7 @@ services:
       REQUEST_LIMIT_PER_DAY: "5"                  # titles per person and 24 h (0 = unlimited)
       REQUEST_VIA_DM: "true"                      # accept direct messages from group members
       REQUEST_ALLOWED_SENDERS: ""                 # comma-separated, empty = all group members
+      REQUEST_GROUP: ""                           # optional: separate group (group.…) for !request
       REQUEST_ADMINS: ""                          # may grab rejected releases, no limit
       REQUEST_COMMANDS_PER_MINUTE: "6"            # spam brake
       RELEASES_SHOWN: "8"

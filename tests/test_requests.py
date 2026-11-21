@@ -34,11 +34,14 @@ TOKEN = "s3cret-token-0123456789"
 BOT = "+4900000000"
 GROUP_INTERNAL = "dGVzdC1ncm91cC1pZA=="                      # internal id as it appears in messages
 GROUP = "group." + base64.b64encode(GROUP_INTERNAL.encode()).decode()
+GROUP2_INTERNAL = "cmVxdWVzdC1ncm91cA=="                    # optional separate request group (REQUEST_GROUP)
+GROUP2 = "group." + base64.b64encode(GROUP2_INTERNAL.encode()).decode()
 MEMBER, MEMBER2, OUTSIDER = "+4900000000011", "+4900000000012", "+4900000000099"
 MEMBER3, ADMIN = "+4900000000013", "+4900000000014"
 MEMBER4, MEMBER5, MEMBER6 = "+4900000000015", "+4900000000016", "+4900000000017"
 MEMBER7, MEMBER8, MEMBER9 = "+4900000000018", "+4900000000019", "+4900000000020"
 MEMBER10, MEMBER11, MEMBER12 = "+4900000000021", "+4900000000023", "+4900000000024"
+MEMBER13 = "+4900000000025"
 
 chat_in: "queue.Queue[dict | None]" = queue.Queue()         # messages pushed to the relay via WebSocket
 sent: list[dict] = []                                       # what the relay sent to Signal
@@ -61,12 +64,15 @@ def fake_releases(query: dict) -> list[dict]:
         return {"guid": f"guid-{title}", "indexerId": 3, "indexer": "TestIndexer", "title": title,
                 "size": size, "quality": {"quality": {"name": quality}}, "approved": approved,
                 "rejections": [] if approved else [reason], "protocol": protocol, "seeders": seeders,
+                "customFormatScore": 1250 if approved else -100,
                 "fullSeason": bool(re.search(r"\.S\d+\.", title))}
     if "movieId" in query:
         movie = library[int(query["movieId"][0])]
         base = f"{dotted(movie['title'])}.{movie['year']}"
         if movie["title"] == "Future Movie":
             return []                                  # not released yet -> nothing at the indexers
+        if movie["title"] == "Many Movie":             # more releases than fit on one page (8)
+            return [rel(f"{base}.Release{i:02d}-GRP", True, i * GB, "WEBDL-1080p") for i in range(1, 13)]
         if movie["title"] == "Green Meadow":
             return [rel("Gruene.Wiese.1985.German.1080p.BluRay.x264-GRP", True, 9 * GB, "Bluray-1080p")]
         return [rel(f"{base}.2160p.UHD.BluRay.x265-TERMiNAL", True, 30 * GB, "Bluray-2160p"),
@@ -139,6 +145,8 @@ RADARR_LOOKUP = {
     "count movie b": [{"title": "Count Movie B", "year": 2017, "tmdbId": 8014}],
     "count movie c": [{"title": "Count Movie C", "year": 2018, "tmdbId": 8015}],
     "expire movie": [{"title": "Expire Movie", "year": 2023, "tmdbId": 8016}],
+    "many movie": [{"title": "Many Movie", "year": 2022, "tmdbId": 8017}],
+    "split movie": [{"title": "Split Movie", "year": 2020, "tmdbId": 8018}],
     "future movie": [{"title": "Future Movie", "year": 2099, "tmdbId": 8011, "status": "announced",
                       "digitalRelease": "2099-05-01T00:00:00Z"}],
     # German release names: only the umlaut spelling finds the movie, under its original title
@@ -532,9 +540,10 @@ def main() -> int:
         say("!releases Test Movie", **carla)
         expect_reply("Searching releases for 🎬 Test Movie")
         r = expect_reply("Releases for 🎬 Test Movie")
-        check("member: !releases lists approved releases with quality/size/seeds",
+        check("member: !releases lists approved releases with quality + score/size/seeds, no indexer",
               r and "1. Test.Movie.2016.2160p.UHD.BluRay.x265-TERMiNAL" in r["message"]
-              and "30.0 GB · 50 seeds · TestIndexer" in r["message"])
+              and "Bluray-2160p (1250 pts) · 30.0 GB · 50 seeds" in r["message"]
+              and "TestIndexer" not in r["message"])
         check("member: releases rejected by the profile are hidden", r and "720p" not in r["message"])
         say("!grab 9", **carla)
         check("!grab with invalid number -> asks for valid range", expect_reply("number from 1 to 2") is not None)
@@ -670,6 +679,26 @@ def main() -> int:
         check("release name with a typo -> list of similar releases to !grab",
               r and "1. Test.Movie.2016.1080p.BluRay.x264-SPARKS" in r["message"] and "!grab" in r["message"])
 
+        # ---------------- long release lists: pages via !more ----------------
+        max_ = dict(sender=MEMBER13, name="Max")
+        say("!request Many Movie", **max_)
+        r = expect_reply("Releases for 🎬 Many Movie (2022)** (1–8 of 12):")
+        check("long list -> first page 1–8 with '!more' hint",
+              r and "8. Many.Movie.2022.Release08" in r["message"] and "Release09" not in r["message"]
+              and "4 more: “!more”" in r["message"])
+        say("!grab 9", **max_)
+        check("!grab of a number not shown yet -> asks for 1 to 8", expect_reply("number from 1 to 8") is not None)
+        say("!more", **max_)
+        r = expect_reply("(9–12 of 12)")
+        check("!more -> next page, numbering continues (9–12), no further hint",
+              r and "9. Many.Movie.2022.Release09" in r["message"] and "12. Many.Movie.2022.Release12" in r["message"]
+              and "!more" not in r["message"])
+        say("!more", **max_)
+        check("!more at the end -> 'that was all'", expect_reply("That was all") is not None)
+        say("!grab 10", **max_)
+        r = expect_reply("Downloading")
+        check("!grab 10 from page 2 -> the 10th release", r and "Release10" in r["message"])
+
         # ---------------- unpicked titles: removed again, never counted, no limit bypass ----------------
         kai = dict(sender=MEMBER10, name="Kai")
         say("!release Typo.Movie.2015.1080p.BluRey.x264-SPARKS", **kai)
@@ -708,13 +737,31 @@ def main() -> int:
         relay.wait(15)
         chat_in.put(None)
 
-    # ---------------- expired release list (short list lifetime) ----------------
+    # ------- second run: separate request group (REQUEST_GROUP) + short list lifetime -------
     ws_connected.clear()
-    relay = subprocess.Popen([sys.executable, RELAY], env=dict(env, SELECTION_TTL_SECONDS="4"),
+    relay = subprocess.Popen([sys.executable, RELAY], env=dict(env, SELECTION_TTL_SECONDS="4", REQUEST_GROUP=GROUP2),
                              stdout=log_file, stderr=log_file)
     try:
-        check("relay (short list lifetime) connects", ws_connected.wait(15))
-        mia = dict(sender=MEMBER12, name="Mia")
+        check("relay (request group, short list lifetime) connects", ws_connected.wait(15))
+        mia = dict(sender=MEMBER12, name="Mia", group=GROUP2_INTERNAL)
+        say("!request Split Movie", sender=MEMBER12, name="Mia")          # in the announcement group
+        check("REQUEST_GROUP set: commands in the announcement group are ignored", no_new_reply())
+        say("!request Split Movie", **mia)
+        r = expect_reply("Releases for 🎬 Split Movie")
+        check("REQUEST_GROUP: request answered in the request group", r and r["recipients"] == [GROUP2])
+        say("!grab 1", **mia)
+        r = expect_reply("Downloading")
+        check("REQUEST_GROUP: reply says it is announced in the announcement group",
+              r and "announced in the announcement group" in r["message"] and r["recipients"] == [GROUP2])
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{relay_port}/radarr", method="POST",
+            data=json.dumps({"eventType": "Download", "movie": {"title": "Split Movie", "year": 2020,
+                                                                 "tmdbId": 8018}}).encode(),
+            headers={"Content-Type": "application/json", "X-Relay-Token": TOKEN})
+        urllib.request.urlopen(req, timeout=10).read()
+        r = expect_reply("New movie:** Split Movie")
+        check("REQUEST_GROUP: announcement still goes to SIGNAL_RECIPIENT, naming the requester",
+              r and r["recipients"] == [GROUP] and "Requested by Mia" in r["message"])
         say("!request Expire Movie", **mia)
         expect_reply("Releases for 🎬 Expire Movie")
         expire_id = next((k for k, v in library.items() if v.get("tmdbId") == 8016), 0)

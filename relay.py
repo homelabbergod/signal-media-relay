@@ -27,7 +27,7 @@ Python standard library only, no dependencies.
 
 from __future__ import annotations
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 import base64
 import binascii
@@ -82,6 +82,9 @@ def _env_int(name: str, default: int) -> int:
 SIGNAL_API_URL = (_env("SIGNAL_API_URL", "http://signal-api:8080") or "").rstrip("/")
 SIGNAL_NUMBER = _env("SIGNAL_NUMBER")
 SIGNAL_RECIPIENT = _env("SIGNAL_RECIPIENT")
+# Optional second group for !request – announcements keep going to SIGNAL_RECIPIENT
+REQUEST_GROUP = _env("REQUEST_GROUP") or SIGNAL_RECIPIENT
+SEPARATE_REQUEST_GROUP = REQUEST_GROUP != SIGNAL_RECIPIENT
 RELAY_TOKEN = _env("RELAY_TOKEN", "")
 LISTEN_HOST = _env("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = _env_int("LISTEN_PORT", 8090)
@@ -138,12 +141,13 @@ REQUEST_ALLOWED_SENDERS = {                                       # empty = all 
 REQUEST_ADMINS = {                                                # may grab releases the profile rejects, no limit
     s.strip() for s in (_env("REQUEST_ADMINS", "") or "").split(",") if s.strip()
 }
-RELEASES_SHOWN = _env_int("RELEASES_SHOWN", 8)                    # how many releases !releases shows
+RELEASES_SHOWN = _env_int("RELEASES_SHOWN", 8)                    # releases per page of a list ("!more" shows the next page)
 RELEASE_SEARCH_TIMEOUT = _env_int("RELEASE_SEARCH_TIMEOUT", 180)  # seconds for the indexer search
 REQUEST_MAX_AGE_SECONDS = 3600      # ignore older commands (e.g. delivered late after downtime)
 # how long a result/release list is valid; an unpicked release list then removes the title again
 SELECTION_TTL_SECONDS = max(_env_int("SELECTION_TTL_SECONDS", 600), 2)
-SELECTION_CHECK_SECONDS = max(1, min(15, SELECTION_TTL_SECONDS // 4))   # how often expired release lists are checked
+SELECTION_CHECK_SECONDS = max(1, min(15, SELECTION_TTL_SECONDS // 4))
+MAX_RELEASES_KEPT = 200             # releases kept per list for "!more" (indexers can return hundreds)   # how often expired release lists are checked
 COMMANDS_PER_MINUTE = _env_int("REQUEST_COMMANDS_PER_MINUTE", 6)   # spam brake per person
 # Signal unreachable: failed messages go to a "retry later" list instead of being dropped
 SIGNAL_RETRY_INTERVAL = _env_int("SIGNAL_RETRY_INTERVAL", 60)      # seconds between retries
@@ -183,6 +187,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "usage": ("ℹ️ **How to request something:**\n"
                   "!request <title> – movie or show; the bot shows the matching releases\n"
                   "!grab <no.> – download a release from the list (nothing is downloaded before)\n"
+                  "!more – next releases of the list\n"
                   "No matching release yet? Then it is downloaded automatically once one is available.\n"
                   "Shows: whole seasons only – the bot asks which season (0 = all) "
                   "or directly: “!request Example Show s2”\n"
@@ -199,6 +204,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "someone": "someone",
         "here": "here",
         "in_group": "in the group",
+        "in_announce_group": "in the announcement group",
         "slow_down": "🐢 Too many commands at once – please wait a minute.",
         "internal_error": "⚠️ Something went wrong internally – please try again later.",
         "not_allowed": "⛔ You are not allowed to make requests.",
@@ -259,7 +265,11 @@ MESSAGES: dict[str, dict[str, str]] = {
                        "as soon as one is available – it will be announced {where}.{hint}"),
         "pick_expired": "⌛ No release picked for {what} – nothing will be downloaded.",
         "pick_expired_removed": " {label} was removed from {arr} again.",
-        "more_not_shown": " · {count} more not shown",
+        "more_hint": "\n➡️ {count} more: “!more”",
+        "page_range": " ({first}–{last} of {total})",
+        "no_more_releases": "📭 That was all – the list has {count} releases. Reply with “!grab <no.>”.",
+        "score": "{quality} ({score} pts)",
+        "score_only": "{score} pts",
         "seeds": "{count} seeds",
         "rejected_default": "rejected by the profile",
         "grab_usage": "❓ Usage: “!grab <no.>” – the number from your last “!releases” list.",
@@ -304,6 +314,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "usage": ("ℹ️ **So fragst du etwas an:**\n"
                   "!request <Titel> – Film oder Serie; der Bot zeigt die passenden Releases\n"
                   "!grab <Nr> – Release aus der Liste laden (vorher wird nichts geladen)\n"
+                  "!mehr – weitere Releases der Liste\n"
                   "Noch kein passendes Release? Dann wird automatisch geladen, sobald eins verfügbar ist.\n"
                   "Serien: nur ganze Staffeln – der Bot fragt nach der Staffel (0 = alle) "
                   "oder direkt: „!request Beispielserie s2“\n"
@@ -320,6 +331,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "someone": "jemand",
         "here": "hier",
         "in_group": "in der Gruppe",
+        "in_announce_group": "in der Ankündigungsgruppe",
         "slow_down": "🐢 Zu viele Befehle auf einmal – bitte eine Minute warten.",
         "internal_error": "⚠️ Da ist intern etwas schiefgelaufen – bitte später nochmal versuchen.",
         "not_allowed": "⛔ Du bist für Anfragen nicht freigeschaltet.",
@@ -377,7 +389,11 @@ MESSAGES: dict[str, dict[str, str]] = {
                        "sobald eins verfügbar ist – es wird {where} angekündigt.{hint}"),
         "pick_expired": "⌛ Für {what} wurde kein Release gewählt – es wird nichts geladen.",
         "pick_expired_removed": " {label} wurde wieder aus {arr} entfernt.",
-        "more_not_shown": " · {count} weitere nicht angezeigt",
+        "more_hint": "\n➡️ {count} weitere: „!mehr“",
+        "page_range": " ({first}–{last} von {total})",
+        "no_more_releases": "📭 Das war alles – die Liste hat {count} Releases. Antworte mit „!grab <Nr>“.",
+        "score": "{quality} ({score} Pkt.)",
+        "score_only": "{score} Pkt.",
         "seeds": "{count} Seeds",
         "rejected_default": "vom Profil abgelehnt",
         "grab_usage": "❓ Nutzung: „!grab <Nr>“ – die Nummer aus deiner letzten „!releases“-Liste.",
@@ -1582,11 +1598,13 @@ class Selection:
     added_now: bool = False      # added by the bot for this selection -> removed again if nothing is picked
     mandatory: bool = False      # from !request: no matching release -> monitor, Radarr/Sonarr load it later
     committed: bool = False      # something was grabbed or monitored -> the title stays
-    releases: list[dict] = field(default_factory=list)
+    releases: list[dict] = field(default_factory=list)   # all visible releases (up to MAX_RELEASES_KEPT)
+    shown: int = 0               # how many of them were sent so far ("!more" sends the next page)
+    header: str = ""             # custom first-page header (e.g. "similar releases")
     expires: float = 0.0
 
 
-_COMMANDS = ("!request", "!releases", "!release", "!grab", "!help", "!hilfe", "!id")
+_COMMANDS = ("!request", "!releases", "!release", "!grab", "!more", "!mehr", "!help", "!hilfe", "!id")
 # Every selection list of the bot contains this hint (both languages)
 _LIST_HINT = re.compile(r"[„“\"](!request|!releases|!grab) <(?:Nr|no\.)>")
 _SEASON_SUFFIX = re.compile(r"\s+(?:s|season\s*|staffel\s*)(\d{1,2})$", re.IGNORECASE)
@@ -1623,11 +1641,13 @@ def _rejection(release: dict) -> str:
 
 
 def _release_lines(index: int, release: dict) -> str:
-    quality = _dict(_dict(release.get("quality")).get("quality")).get("name")
-    facts = [_clean(quality, 30), _fmt_size(release.get("size"))]
+    quality = _clean(_dict(_dict(release.get("quality")).get("quality")).get("name"), 30)
+    score = release.get("customFormatScore")
+    if isinstance(score, int) and not isinstance(score, bool):   # custom format score of the quality profile
+        quality = t("score", quality=quality, score=score) if quality else t("score_only", score=score)
+    facts = [quality, _fmt_size(release.get("size"))]
     if release.get("protocol") == "torrent" and release.get("seeders") is not None:
         facts.append(t("seeds", count=_to_int(release.get("seeders")) or 0))
-    facts.append(_clean(release.get("indexer"), 30))
     text = f"{index}. {_plain(_clean(release.get('title'), 100))}\n    " + _plain(" · ".join(f for f in facts if f))
     if not release.get("approved"):
         text += f"\n    ⛔ {_plain(_rejection(release))}"
@@ -1668,7 +1688,7 @@ class RequestService:
             ArrClient("radarr", RADARR_URL, RADARR_API_KEY, RADARR_QUALITY_PROFILE, RADARR_ROOT_FOLDER),
             ArrClient("sonarr", SONARR_URL, SONARR_API_KEY, SONARR_QUALITY_PROFILE, SONARR_ROOT_FOLDER),
         ) if c.enabled]
-        self.group_id = _internal_group_id(SIGNAL_RECIPIENT)
+        self.group_id = _internal_group_id(REQUEST_GROUP)
         self._commands: "queue.Queue[Command]" = queue.Queue(maxsize=100)
         self._pending: dict[str, tuple[float, list[Candidate]]] = {}
         self._adds: dict[str, list[tuple[float, str]]] = {}   # (time, title key) for the daily limit
@@ -1795,7 +1815,7 @@ class RequestService:
         if group_id:
             if not self.group_id or group_id != self.group_id:
                 return None                                  # another group
-            in_group, reply_to = True, SIGNAL_RECIPIENT
+            in_group, reply_to = True, REQUEST_GROUP
         else:
             if own or not REQUEST_VIA_DM:
                 return None                                  # own DMs to third parties / DMs disabled
@@ -1869,10 +1889,10 @@ class RequestService:
         if now - fetched_at < 600:
             return members
         if not self.group_id:
-            members = frozenset({SIGNAL_RECIPIENT})
+            members = frozenset({REQUEST_GROUP})
         else:
             url = (f"{SIGNAL_API_URL}/v1/groups/{urllib.parse.quote(SIGNAL_NUMBER, safe='+')}/"
-                   f"{urllib.parse.quote(SIGNAL_RECIPIENT, safe='=')}")
+                   f"{urllib.parse.quote(REQUEST_GROUP, safe='=')}")
             try:
                 with _SIGNAL_OPENER.open(urllib.request.Request(url), timeout=15) as resp:
                     data = _dict(json.loads(resp.read(MAX_BODY_BYTES)))
@@ -1882,6 +1902,13 @@ class RequestService:
                 return members
         self._members = (now, members)
         return members
+
+    @staticmethod
+    def _where(cmd: Command) -> str:
+        """Where finished downloads are announced, seen from the person asking."""
+        if SEPARATE_REQUEST_GROUP:
+            return t("in_announce_group")
+        return t("here") if cmd.in_group else t("in_group")
 
     def _is_admin(self, cmd: Command) -> bool:
         return bool({i for i in (cmd.number, cmd.uuid) if i} & REQUEST_ADMINS)
@@ -1921,6 +1948,8 @@ class RequestService:
             self._cmd_releases(cmd, args)
         elif word == "!grab":
             self._cmd_grab(cmd, args)
+        elif word in ("!more", "!mehr"):
+            self._cmd_more(cmd)
         elif word == "!release":
             self._cmd_release(cmd, args)
 
@@ -2088,7 +2117,7 @@ class RequestService:
                 return
         if self._limit_reached(cmd, cand.key):
             return
-        where = t("here") if cmd.in_group else t("in_group")
+        where = self._where(cmd)
         if not chosen:
             # No season known yet (show hasn't started): there are no season packs to pick from ->
             # Sonarr downloads the episodes as they air (SONARR_MONITOR)
@@ -2272,23 +2301,62 @@ class RequestService:
         log.info("No matching release, monitored for later by %s: %s", _mask_number(cmd.sender), what)
         hint = _release_hint(cand.item) if cand.is_movie else ""
         self._reply(cmd, t("auto_later", what=what, extra=extra, arr=cand.client.name,
-                           where=t("here") if cmd.in_group else t("in_group"), hint=hint), poster=cand.poster())
+                           where=self._where(cmd), hint=hint), poster=cand.poster())
         return True
 
     def _present(self, sel: Selection, visible: list[dict], header: str = "") -> None:
-        cand = sel.cand
-        sel.releases = visible[:max(RELEASES_SHOWN, 1)]
-        sel.expires = time.time() + SELECTION_TTL_SECONDS
+        sel.releases = visible[:MAX_RELEASES_KEPT]
+        sel.shown = 0
+        sel.header = header
         self._store_selection(sel)
+        self._send_page(sel, sel.cmd)
+
+    def _send_page(self, sel: Selection, cmd: Command) -> None:
+        """Next page of the release list. Numbers continue across pages, so "!grab 12" works on page 2."""
+        cand = sel.cand
+        start = sel.shown
+        page = sel.releases[start:start + max(RELEASES_SHOWN, 1)]
+        sel.shown = start + len(page)
+        sel.expires = time.time() + SELECTION_TTL_SECONDS
+        total = len(sel.releases)
         season_txt = t("season_suffix", n=sel.season) if sel.season is not None and not sel.episode_id else ""
-        lines = [header or t("releases_header", label=cand.label(), season=season_txt)]
-        lines += [_release_lines(i, r) for i, r in enumerate(sel.releases, 1)]
-        more = len(visible) - len(sel.releases)
+        if start == 0 and sel.header:
+            header = sel.header
+        else:
+            header = t("releases_header", label=cand.label(), season=season_txt)
+        if total > len(page) or start:   # "(9–16 of 40)" before the closing colon of the header
+            colon = header.endswith(":")
+            header = header.rstrip(":") + t("page_range", first=start + 1, last=sel.shown, total=total) \
+                + (":" if colon else "")
+        lines = [header]
+        lines += [_release_lines(i, r) for i, r in enumerate(page, start + 1)]
+        remaining = total - sel.shown
         lines += ["", t("grab_hint", minutes=SELECTION_TTL_SECONDS // 60 or 1)
-                  + (t("more_not_shown", count=more) if more > 0 else "")]
+                  + (t("more_hint", count=remaining) if remaining > 0 else "")]
         if sel.mandatory or sel.added_now:
             lines.append(t("pick_hint"))
-        self._reply(sel.cmd, "\n".join(lines))
+        self._reply(cmd, "\n".join(lines))
+
+    def _open_selection(self, cmd: Command) -> Selection | None:
+        """The sender's open release list – or None after telling them why there is none."""
+        sel = self._release_lists.get(cmd.sender)
+        if sel is None or not sel.releases:
+            self._reply(cmd, t("no_release_list"))
+            return None
+        if time.time() > sel.expires:
+            if not self._expire(sel):
+                self._reply(cmd, t("release_list_expired"))
+            return None
+        return sel
+
+    def _cmd_more(self, cmd: Command) -> None:
+        sel = self._open_selection(cmd)
+        if sel is None:
+            return
+        if sel.shown >= len(sel.releases):
+            self._reply(cmd, t("no_more_releases", count=sel.shown))
+            return
+        self._send_page(sel, cmd)
 
     def _store_selection(self, sel: Selection) -> None:
         """A new list replaces the sender's open one. Its unpicked title is removed again – unless it
@@ -2361,17 +2429,12 @@ class RequestService:
         if not args.isdigit():
             self._reply(cmd, t("grab_usage"))
             return
-        sel = self._release_lists.get(cmd.sender)
+        sel = self._open_selection(cmd)
+        if sel is None:
+            return
         choice = int(args)
-        if sel is None or not sel.releases:
-            self._reply(cmd, t("no_release_list"))
-            return
-        if time.time() > sel.expires:
-            if not self._expire(sel):
-                self._reply(cmd, t("release_list_expired"))
-            return
-        if not 1 <= choice <= len(sel.releases):
-            self._reply(cmd, t("pick_range", count=len(sel.releases)))
+        if not 1 <= choice <= sel.shown:
+            self._reply(cmd, t("pick_range", count=sel.shown))
             return
         self._grab(cmd, sel, sel.releases[choice - 1])
 
@@ -2398,7 +2461,7 @@ class RequestService:
         log.info("Release grabbed by %s: %s (%s)", _mask_number(cmd.sender), title, cand.label())
         override = "" if release.get("approved") else t("admin_override")
         self._reply(cmd, t("downloading", title=title, label=cand.label(), override=override,
-                           where=t("here") if cmd.in_group else t("in_group")))
+                           where=self._where(cmd)))
         if sel.seasons:   # "0 = all seasons": next season's list
             sel.cmd = cmd
             self._offer(sel)
@@ -2705,6 +2768,8 @@ def validate_config() -> list[str]:
     if not (SIGNAL_RECIPIENT.startswith("group.") and _internal_group_id(SIGNAL_RECIPIENT)) \
             and not re.fullmatch(r"\+\d{6,15}", SIGNAL_RECIPIENT):
         problems.append("SIGNAL_RECIPIENT must be a valid group ID (group.…) or phone number")
+    if _env("REQUEST_GROUP") and not (REQUEST_GROUP.startswith("group.") and _internal_group_id(REQUEST_GROUP)):
+        problems.append("REQUEST_GROUP must be a valid group ID (group.…)")
     for name, url in (("SIGNAL_API_URL", SIGNAL_API_URL), ("JELLYFIN_URL", JELLYFIN_URL),
                       ("RADARR_URL", RADARR_URL), ("SONARR_URL", SONARR_URL)):
         if url and urllib.parse.urlsplit(url).scheme not in ("http", "https"):
@@ -2762,9 +2827,12 @@ def main() -> None:
         if not ((RADARR_URL and RADARR_API_KEY) or (SONARR_URL and SONARR_API_KEY)):
             sys.exit("Configuration error: REQUESTS_ENABLED=true, but neither RADARR_URL+RADARR_API_KEY "
                      "nor SONARR_URL+SONARR_API_KEY is set")
-        if not SIGNAL_RECIPIENT.startswith("group.") and not REQUEST_ALLOWED_SENDERS:
+        if not REQUEST_GROUP.startswith("group.") and not REQUEST_ALLOWED_SENDERS:
             log.warning("SIGNAL_RECIPIENT is not a group – !request is only accepted via direct message "
                         "from the recipient")
+        if SEPARATE_REQUEST_GROUP:
+            log.info("Requests via group %s, announcements via %s",
+                     _mask_number(REQUEST_GROUP), _mask_number(SIGNAL_RECIPIENT))
 
     if not _env("BOT_LANGUAGE"):
         # 0.9.0 changed the default from German to English – existing installs would switch silently

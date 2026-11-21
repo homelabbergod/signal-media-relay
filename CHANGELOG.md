@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.1
+
+### Added
+- **Long release lists can be paged:** `!more` (German: `!mehr`) shows the next releases. The numbers continue across pages, so `!grab 12` works on page 2. The header shows the range, e.g. “(9–16 of 40)”. Before, everything after the first `RELEASES_SHOWN` releases was hidden.
+- **Separate request group (optional):** with `REQUEST_GROUP` set, `!request` and the release lists live in their own Signal group, while announcements stay in `SIGNAL_RECIPIENT`. Commands in the announcement group are then ignored, and the bot says the title will be announced “in the announcement group”. DM requests are checked against the members of the request group. Without `REQUEST_GROUP` nothing changes.
+
+### Changed
+- **Release lines:** the indexer name is gone. The custom format score of the quality profile now appears next to the quality, e.g. “WEBDL-1080p (1250 pts)”.
+
 ## 0.10.0
 
 ### Changed

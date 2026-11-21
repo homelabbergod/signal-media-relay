@@ -1,6 +1,6 @@
 # Signal Media Relay
 
-**Version 0.10.0** · [Changelog](CHANGELOG.md) · [Releases](https://github.com/homelabbergod/signal-media-relay/releases) · [Source on GitHub](https://github.com/homelabbergod/signal-media-relay) · Docker image: [`homelabbergod/signal-media-relay`](https://hub.docker.com/r/homelabbergod/signal-media-relay)
+**Version 0.10.1** · [Changelog](CHANGELOG.md) · [Releases](https://github.com/homelabbergod/signal-media-relay/releases) · [Source on GitHub](https://github.com/homelabbergod/signal-media-relay) · Docker image: [`homelabbergod/signal-media-relay`](https://hub.docker.com/r/homelabbergod/signal-media-relay)
 
 Announces new movies and episodes from **Sonarr/Radarr** (or **Jellyfin**) in a **Signal group**. Group members can request movies and shows right from the chat.
 
@@ -97,7 +97,7 @@ Bot:  📺 Example Show (2022) – which season?
 Ben:  2                      (reply to the list, or: !request 2)
 Bot:  📦 Releases for 📺 Example Show (2022) – Season 2:
       1. Example.Show.S02.1080p.WEB-DL-GRP
-         WEBDL-1080p · 20.0 GB · 50 seeds · Indexer
+         WEBDL-1080p (1250 pts) · 20.0 GB · 50 seeds
       Reply with “!grab <no.>” (valid for 10 min)
       ℹ️ Nothing is downloaded until you pick a release.
 Ben:  !grab 1
@@ -116,6 +116,7 @@ Bot:  ⬇️ Downloading: Example.Show.S02.1080p.WEB-DL-GRP
 |---|---|
 | `!request <title>` | Shows the matching releases of a movie, or asks which season for a show. Add a year or `s2` to be precise. |
 | `!grab <no.>` | Download a release from the bot's list |
+| `!more` / `!mehr` | Next page of a long release list; the numbers continue (`RELEASES_SHOWN` per page, default 8) |
 | `!releases <title>` | Release list only, like *Interactive Search* (shows: `!releases <title> s2`) |
 | `!release <release name>` | Download exactly this release, also a single episode. The title is detected from the name, German release names included. |
 | `!id` | Sends you your Signal ID privately, for the admin and allow lists |
@@ -142,6 +143,7 @@ All options are commented in [`docker-compose.yml`](docker-compose.yml) and in t
 | `REQUESTS_ENABLED` | `false` | Turn on chat requests |
 | `REQUEST_LIMIT_PER_DAY` | `5` | Titles per person per 24 h (`0` = unlimited) |
 | `REQUEST_ADMINS` | – | Numbers/UUIDs (from `!id`) with extra rights |
+| `REQUEST_GROUP` | – | Optional second group (`group.…`) for `!request`. Announcements stay in `SIGNAL_RECIPIENT`; commands there are then ignored. The bot account must be a member of both groups. |
 | `SELECTION_TTL_SECONDS` | `600` | How long a bot list stays valid; an unpicked release list then removes its title again |
 
 Changes take effect with `docker compose up -d`. A plain `restart` keeps the old values.

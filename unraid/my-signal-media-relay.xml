@@ -7,7 +7,7 @@
 -->
 <Container version="2">
   <Name>signal-media-relay</Name>
-  <Repository>homelabbergod/signal-media-relay:0.10.0</Repository>
+  <Repository>homelabbergod/signal-media-relay:0.10.1</Repository>
   <Registry>https://hub.docker.com/r/homelabbergod/signal-media-relay</Registry>
   <Network>signal-net</Network>
   <MyIP/>
@@ -63,6 +63,7 @@
   <Config Name="Radarr API key" Target="RADARR_API_KEY" Default="" Mode="" Description="Radarr: Settings -&gt; General -&gt; Security" Type="Variable" Display="always" Required="false" Mask="true"></Config>
   <Config Name="Sonarr URL" Target="SONARR_URL" Default="" Mode="" Description="Sonarr behind gluetun: http://UNRAID-IP:8989 (the port gluetun publishes)" Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="Sonarr API key" Target="SONARR_API_KEY" Default="" Mode="" Description="Sonarr: Settings -&gt; General -&gt; Security" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Request group (optional)" Target="REQUEST_GROUP" Default="" Mode="" Description="Separate group ID (group.…) for !request. Empty = requests in the announcement group" Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="Admins" Target="REQUEST_ADMINS" Default="" Mode="" Description="Comma-separated numbers/UUIDs (get yours with !id): may grab releases the profile rejects, no daily limit" Type="Variable" Display="always" Required="false" Mask="false"></Config>
   <Config Name="Requests per day" Target="REQUEST_LIMIT_PER_DAY" Default="5" Mode="" Description="Titles per person and 24 h (0 = unlimited)" Type="Variable" Display="always" Required="false" Mask="false">5</Config>
   <Config Name="Requests via direct message" Target="REQUEST_VIA_DM" Default="true" Mode="" Description="Accept direct messages from group members – needed if only admins may write in the group (true/false)" Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
