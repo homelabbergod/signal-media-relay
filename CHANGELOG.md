@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.2
+
+### Added
+- **`DISPLAY_MOVIE_PLOT`** (default `true`): set it to `false` to hide the plot under new movies.
+
+### Fixed
+- **Restart with an open release list:** open lists only live in memory, so a title the bot had added for an unpicked list stayed unmonitored in Radarr/Sonarr forever after a restart or update. When the container stops, the bot now removes these titles (same checks as on expiry: never files, never monitored titles) and tells the requester. A crash or power loss still can't be covered this way.
+- **Movie title and plot were always English.** Radarr's webhook only carries the English text. With `RADARR_URL` + API key set, the relay now takes title and plot from Radarr's API, which returns them in Radarr's *Movie Info Language*. It does so only when that language matches `BOT_LANGUAGE`; otherwise it keeps the English text and the log says how to set Radarr (*Settings → UI → Movie Info Language*). If Radarr can't be reached, the webhook text is used.
+
 ## 0.10.1
 
 ### Added

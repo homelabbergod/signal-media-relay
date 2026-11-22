@@ -27,7 +27,7 @@ Python standard library only, no dependencies.
 
 from __future__ import annotations
 
-__version__ = "0.10.1"
+__version__ = "0.10.2"
 
 import base64
 import binascii
@@ -97,6 +97,7 @@ QUEUE_RECHECK_SECONDS = _env_int("QUEUE_RECHECK_SECONDS", 120)              # ho
 DEDUPE_HOURS = _env_int("DEDUPE_HOURS", 24)
 MAX_EPISODES_LISTED = _env_int("MAX_EPISODES_LISTED", 10)
 OVERVIEW_MAX_CHARS = _env_int("OVERVIEW_MAX_CHARS", 350)
+DISPLAY_MOVIE_PLOT = _env_bool("DISPLAY_MOVIE_PLOT", True) and OVERVIEW_MAX_CHARS > 0   # plot under movies
 ANNOUNCE_UPGRADES = _env_bool("ANNOUNCE_UPGRADES", False)
 ANNOUNCE_TESTS = _env_bool("ANNOUNCE_TESTS", False)
 SEND_POSTERS = _env_bool("SEND_POSTERS", True)
@@ -265,6 +266,7 @@ MESSAGES: dict[str, dict[str, str]] = {
                        "as soon as one is available – it will be announced {where}.{hint}"),
         "pick_expired": "⌛ No release picked for {what} – nothing will be downloaded.",
         "pick_expired_removed": " {label} was removed from {arr} again.",
+        "pick_restart": "🔄 The bot is restarting – your release list for {what} is closed, nothing was downloaded.",
         "more_hint": "\n➡️ {count} more: “!more”",
         "page_range": " ({first}–{last} of {total})",
         "no_more_releases": "📭 That was all – the list has {count} releases. Reply with “!grab <no.>”.",
@@ -389,6 +391,7 @@ MESSAGES: dict[str, dict[str, str]] = {
                        "sobald eins verfügbar ist – es wird {where} angekündigt.{hint}"),
         "pick_expired": "⌛ Für {what} wurde kein Release gewählt – es wird nichts geladen.",
         "pick_expired_removed": " {label} wurde wieder aus {arr} entfernt.",
+        "pick_restart": "🔄 Der Bot startet neu – deine Release-Liste für {what} ist geschlossen, es wurde nichts geladen.",
         "more_hint": "\n➡️ {count} weitere: „!mehr“",
         "page_range": " ({first}–{last} von {total})",
         "no_more_releases": "📭 Das war alles – die Liste hat {count} Releases. Antworte mit „!grab <Nr>“.",
@@ -811,7 +814,7 @@ class Relay:
             lines.append(t("quality", quality=_plain(m.quality)))
         if m.requester:
             lines.append(t("requested_by", name=_plain(m.requester)))
-        if m.overview:
+        if m.overview and DISPLAY_MOVIE_PLOT:
             lines.append("")
             lines.append(f"*{_plain(_truncate(m.overview, OVERVIEW_MAX_CHARS))}*")
         return "\n".join(lines)
@@ -1018,6 +1021,44 @@ def handle_sonarr(data: dict) -> str:
     return "ok"
 
 
+_RADARR_LANGUAGE_IDS = {"en": 1, "de": 4}    # Radarr language ids (verified against Radarr's /language)
+_radarr_language: list = [0.0, None]          # [checked at, Radarr's movieInfoLanguage]
+
+
+def _radarr_language_matches(client: "ArrClient") -> bool:
+    """Is Radarr's "Movie Info Language" (Settings -> UI) the bot language? Checked at most once an hour."""
+    now = time.time()
+    if now - _radarr_language[0] > 3600:
+        try:
+            language = _to_int(_dict(client.call("GET", "/config/ui", timeout=5)).get("movieInfoLanguage"))
+        except ArrError as exc:
+            log.info("Radarr language setting not readable (%s)", exc.user_msg)
+            return False
+        _radarr_language[:] = [now, language]
+        if language != _RADARR_LANGUAGE_IDS.get(BOT_LANGUAGE):
+            log.warning("Radarr's movie info language doesn't match BOT_LANGUAGE=%s – movie titles/plots are "
+                        "announced in English. Fix: Radarr -> Settings -> UI -> Movie Info Language = %s",
+                        BOT_LANGUAGE, "German" if BOT_LANGUAGE == "de" else "English")
+    return _radarr_language[1] == _RADARR_LANGUAGE_IDS.get(BOT_LANGUAGE)
+
+
+def _radarr_translation(movie_id: int | None) -> tuple[str, str]:
+    """Title and plot in the bot language. The webhook only carries the English text; Radarr's API returns
+    the translation in its "Movie Info Language" – used if that matches BOT_LANGUAGE.
+    Needs RADARR_URL + RADARR_API_KEY; otherwise (or on errors) the webhook text is used."""
+    if not (movie_id and RADARR_URL and RADARR_API_KEY):
+        return "", ""
+    client = ArrClient("radarr", RADARR_URL, RADARR_API_KEY, "", "")
+    if not _radarr_language_matches(client):
+        return "", ""
+    try:
+        movie = _dict(client.call("GET", f"/movie/{movie_id}", timeout=5))
+    except ArrError as exc:
+        log.info("Translated movie text not available (%s) – using the webhook text", exc.user_msg)
+        return "", ""
+    return _clean(movie.get("title")), _clean(movie.get("overview"), 2000)
+
+
 def handle_radarr(data: dict) -> str:
     event = data.get("eventType", "")
     if event == "Test":
@@ -1029,11 +1070,12 @@ def handle_radarr(data: dict) -> str:
 
     movie = _dict(data.get("movie"))
     tmdb_id = _to_int(movie.get("tmdbId"))
+    title, overview = _radarr_translation(_to_int(movie.get("id")))
     RELAY.add_movie(
         requester_key=f"movie:{tmdb_id}" if tmdb_id else "",
-        title=_clean(movie.get("title")) or t("unknown_movie"),
+        title=title or _clean(movie.get("title")) or t("unknown_movie"),
         year=_clean(movie.get("year"), 4),
-        overview=_clean(movie.get("overview"), 2000),
+        overview=overview or _clean(movie.get("overview"), 2000),
         quality=_clean(_dict(data.get("movieFile")).get("quality"), 60),
         poster=_arr_poster(movie.get("images")),
         source="Radarr",
@@ -1306,6 +1348,7 @@ class ArrClient:
         self.quality_profile, self.root_folder = quality_profile, root_folder
         self._defaults: tuple[int, str, dict] | None = None
         self._lock = threading.Lock()
+        self.timeout_cap: float | None = None              # set on shutdown: keep within Docker's stop timeout
 
     @property
     def enabled(self) -> bool:
@@ -1317,6 +1360,8 @@ class ArrClient:
             data=json.dumps(body).encode("utf-8") if body is not None else None,
             headers={"X-Api-Key": self.api_key, "Accept": "application/json",
                      "Content-Type": "application/json", "User-Agent": USER_AGENT})
+        if self.timeout_cap is not None:
+            timeout = min(timeout, self.timeout_cap)
         try:
             with _ARR_OPENER.open(req, timeout=timeout) as resp:
                 raw = resp.read(MAX_ARR_RESPONSE_BYTES + 1)
@@ -1702,6 +1747,8 @@ class RequestService:
         self._state_lock = threading.Lock()
         self.receiver_connected = False
         self.receiver_down_since = time.time()
+        self._busy = threading.Lock()     # held by the worker while it processes; shutdown waits for it briefly
+        self._stopping = False
 
     def start(self) -> None:
         for target, name in ((self._receiver_loop, "signal-receiver"), (self._worker_loop, "request-worker"),
@@ -1864,17 +1911,41 @@ class RequestService:
             try:
                 cmd = self._commands.get(timeout=SELECTION_CHECK_SECONDS)
             except queue.Empty:
-                try:   # also without new commands: expired selections remove their unpicked titles
-                    self._expire_selections()
+                cmd = None
+            with self._busy:
+                if self._stopping:
+                    continue
+                if cmd is None:
+                    try:   # also without new commands: expired selections remove their unpicked titles
+                        self._expire_selections()
+                    except Exception:  # noqa: BLE001
+                        log.exception("Error while expiring release lists")
+                    continue
+                try:
+                    self._prune()
+                    self.handle(cmd)
                 except Exception:  # noqa: BLE001
-                    log.exception("Error while expiring release lists")
-                continue
-            try:
-                self._prune()
-                self.handle(cmd)
-            except Exception:  # noqa: BLE001
-                log.exception("Error while processing %r", cmd.text)
-                self._reply(cmd, t("internal_error"))
+                    log.exception("Error while processing %r", cmd.text)
+                    self._reply(cmd, t("internal_error"))
+
+    def shutdown(self, seconds: float = 5.0) -> None:
+        """The container stops (update, restart): open release lists only live in memory. Remove the titles
+        the bot added for them now – after the restart nobody knows about them any more, and they would stay
+        unmonitored in Radarr/Sonarr forever. Same checks as on expiry (never files, never monitored titles)."""
+        deadline = time.time() + seconds
+        locked = self._busy.acquire(timeout=2)   # let a running command finish (a release search may not)
+        self._stopping = True
+        try:
+            for client in self.clients:
+                client.timeout_cap = 2
+            for sel in list(self._release_lists.values()):
+                if time.time() > deadline:
+                    log.warning("Shutdown: no time left to clean up %d open release list(s)", len(self._release_lists))
+                    break
+                self._expire(sel, "pick_restart")
+        finally:
+            if locked:
+                self._busy.release()
 
     def _reply(self, cmd: Command, text: str, poster: Poster | None = None) -> None:
         author = cmd.number or cmd.uuid
@@ -2405,8 +2476,8 @@ class RequestService:
         for sel in [s for s in self._release_lists.values() if now > s.expires]:
             self._expire(sel)
 
-    def _expire(self, sel: Selection) -> bool:
-        """Release list expired without a pick. Returns True if the user was told."""
+    def _expire(self, sel: Selection, reason: str = "pick_expired") -> bool:
+        """Release list expired (or the bot stops) without a pick. Returns True if the user was told."""
         if self._release_lists.get(sel.cmd.sender) is sel:
             del self._release_lists[sel.cmd.sender]
         removed = self._remove_unpicked(sel)
@@ -2417,10 +2488,11 @@ class RequestService:
             what = sel.cand.label() + " – " + t("what_many", numbers=", ".join(map(str, left)))
         else:
             what = sel.cand.label() + (t("season_suffix", n=left[0]) if left else "")
-        text = t("pick_expired", what=what)
+        text = t(reason, what=what)
         if removed:
             text += t("pick_expired_removed", label=sel.cand.label(), arr=sel.cand.client.name)
-        log.info("Release list expired without a pick: %s%s", what, " (title removed)" if removed else "")
+        log.info("Release list %s without a pick: %s%s", "closed on shutdown" if reason == "pick_restart" else "expired",
+                 what, " (title removed)" if removed else "")
         self._reply(sel.cmd, text)
         return True
 
@@ -2822,6 +2894,8 @@ def main() -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_sigterm)
+    if hasattr(signal, "SIGBREAK"):   # Windows (tests): CTRL_BREAK instead of SIGTERM
+        signal.signal(signal.SIGBREAK, _on_sigterm)
 
     if REQUESTS_ENABLED:
         if not ((RADARR_URL and RADARR_API_KEY) or (SONARR_URL and SONARR_API_KEY)):
@@ -2859,6 +2933,11 @@ def main() -> None:
         pass
     finally:
         log.info("Shutting down – sending pending announcements …")
+        if REQUESTS is not None:
+            try:
+                REQUESTS.shutdown()
+            except Exception:  # noqa: BLE001
+                log.exception("Error while closing open release lists")
         RELAY.flush_all()
         RELAY.wait_until_sent(timeout=20)
         if RELAY.retry_count:

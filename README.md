@@ -1,6 +1,6 @@
 # Signal Media Relay
 
-**Version 0.10.1** · [Changelog](CHANGELOG.md) · [Releases](https://github.com/homelabbergod/signal-media-relay/releases) · [Source on GitHub](https://github.com/homelabbergod/signal-media-relay) · Docker image: [`homelabbergod/signal-media-relay`](https://hub.docker.com/r/homelabbergod/signal-media-relay)
+**Version 0.10.2** · [Changelog](CHANGELOG.md) · [Releases](https://github.com/homelabbergod/signal-media-relay/releases) · [Source on GitHub](https://github.com/homelabbergod/signal-media-relay) · Docker image: [`homelabbergod/signal-media-relay`](https://hub.docker.com/r/homelabbergod/signal-media-relay)
 
 Announces new movies and episodes from **Sonarr/Radarr** (or **Jellyfin**) in a **Signal group**. Group members can request movies and shows right from the chat.
 
@@ -109,7 +109,7 @@ Bot:  ⬇️ Downloading: Example.Show.S02.1080p.WEB-DL-GRP
 - Members only see releases that match the quality profile. Admins also see rejected ones, with the reason.
 - **Shows:** only whole seasons (season packs). With “0 = all seasons” the lists come one season after another. Single episodes work with `!release <release name>`.
 - **No matching release yet** (e.g. a movie that isn't out): the bot monitors the title, and Radarr/Sonarr download it as soon as a release shows up.
-- **Nothing picked within 10 minutes:** a title the bot added for the list is removed again (files are never deleted), and the bot says so.
+- **Nothing picked within 10 minutes:** a title the bot added for the list is removed again (files are never deleted), and the bot says so. The same happens for open lists when the container stops (update, restart).
 - A title only counts towards the daily limit once something was grabbed or monitored.
 
 | Command | What it does |
@@ -140,6 +140,7 @@ All options are commented in [`docker-compose.yml`](docker-compose.yml) and in t
 | `BOT_LANGUAGE` | `en` | `en` or `de` |
 | `ANNOUNCE_TESTS` | `false` | Post the *Test* button of Sonarr/Radarr into the group |
 | `ANNOUNCE_WAIT_FOR_QUEUE` | `true` | Announce a show/movie only when Sonarr/Radarr has nothing left for it in the download queue (needs `SONARR_URL`/`RADARR_URL` + API key; max. `ANNOUNCE_MAX_WAIT_SECONDS`, default 6 h) |
+| `DISPLAY_MOVIE_PLOT` | `true` | Show the plot under new movies. Title and plot follow `BOT_LANGUAGE` when Radarr's *Settings → UI → Movie Info Language* is the same language (needs `RADARR_URL` + API key); otherwise they are English and the log says what to change |
 | `REQUESTS_ENABLED` | `false` | Turn on chat requests |
 | `REQUEST_LIMIT_PER_DAY` | `5` | Titles per person per 24 h (`0` = unlimited) |
 | `REQUEST_ADMINS` | – | Numbers/UUIDs (from `!id`) with extra rights |

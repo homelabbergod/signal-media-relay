@@ -49,6 +49,7 @@ services:
       ANNOUNCE_MAX_WAIT_SECONDS: "21600"          # ... but announce after 6 h at the latest
       DEDUPE_HOURS: "24"                          # don't post the same item twice (0 = off)
       MAX_EPISODES_LISTED: "10"
+      DISPLAY_MOVIE_PLOT: "true"                  # plot under new movies (true/false)
       OVERVIEW_MAX_CHARS: "350"
       ANNOUNCE_UPGRADES: "false"                  # also announce quality upgrades
       ANNOUNCE_TESTS: "false"                     # post the "Test" button events into the group

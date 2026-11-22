@@ -71,6 +71,27 @@ class FakeUpstream(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path == "/api/v3/config/ui":                    # Radarr's "Movie Info Language" = German (4)
+            body = json.dumps({"movieInfoLanguage": 4, "uiLanguage": 1}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/api/v3/movie/"):              # fake Radarr movie API (translated texts)
+            if self.path != "/api/v3/movie/78":
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = json.dumps({"id": 78, "title": "Übersetzter Film", "year": 2015,
+                               "overview": "Eine deutsche Beschreibung."}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/api/v3/queue/details?"):     # fake Sonarr/Radarr queue
             body = json.dumps(fake_queue(self.path.split("?", 1)[1])).encode()
             self.send_response(200)
@@ -225,10 +246,13 @@ def main() -> int:
         post("/sonarr", show("Stuck Show", 43, 1, 1), auth)
         post("/sonarr", show("Failed Show", 44, 1, 1), auth)
         post("/radarr", {"eventType": "Download", "movie": {"title": "Queued Movie", "year": 2014, "id": 77}}, auth)
+        # 0.10.2: Radarr is set to German, the bot to English -> the (English) webhook text is used
+        post("/radarr", {"eventType": "Download", "movie": {"title": "Translated Movie", "year": 2015, "id": 78,
+                                                            "overview": "An English description."}}, auth)
         time.sleep(1.5)
         post("/sonarr", show("Queue Show", 42, 2, 3), auth)     # arrives while the show is still downloading
 
-        expected = 3 + 7 + 1 + 2 + 3 + 70 + 2 + 4   # ... + After Break, FLAKY + 4 queue scenarios
+        expected = 3 + 7 + 1 + 2 + 3 + 70 + 2 + 4 + 1   # ... + After Break, FLAKY + 4 queue scenarios + translated
         deadline = time.time() + 60
         while len(sent_to_signal) < expected and time.time() < deadline:
             time.sleep(0.2)
@@ -301,6 +325,10 @@ def main() -> int:
     queued_movie = [m["message"] for m in sent_to_signal if "Queued Movie" in m["message"]]
     check("movie waits for Radarr's queue, then is announced on its own",
           len(queued_movie) == 1 and queued_movie[0].startswith("🎬") and queue_calls.get("movieId=77", 0) >= 3)
+    english = message("Translated Movie")
+    check("BOT_LANGUAGE=en, Radarr set to German -> English webhook title/plot + hint in the log",
+          bool(english and "*An English description.*" in english["message"]) and not message("Übersetzter Film")
+          and "Movie Info Language = English" in log_text)
     check("/health reports running sender/flusher", health_after.get("status") == "ok"
           and health_after.get("sender") == "running" and health_after.get("flusher") == "running")
 
@@ -349,13 +377,19 @@ def main() -> int:
                 time.sleep(0.1)
         for path, payload in (("/radarr", {"eventType": "Download", "movie": {"title": "Deutsch Test", "year": 2001},
                                            "movieFile": {"quality": "WEBDL-1080p"}}),
+                              ("/radarr", {"eventType": "Download",
+                                           "movie": {"title": "Translated Movie", "year": 2015, "id": 78,
+                                                     "overview": "An English description."}}),
+                              ("/radarr", {"eventType": "Download",          # no translation (404) -> webhook
+                                           "movie": {"title": "Webhook Only", "year": 2016, "id": 79,
+                                                     "overview": "Fallback text."}}),
                               ("/sonarr", {"eventType": "Download", "series": {"title": "Deutsch Serie"},
                                            "episodes": [{"seasonNumber": 3, "episodeNumber": 1}]})):
             urllib.request.urlopen(urllib.request.Request(
                 f"http://127.0.0.1:{de_port}{path}", data=json.dumps(payload).encode(), method="POST",
                 headers={"Content-Type": "application/json", "X-Relay-Token": TOKEN}), timeout=10).read()
         deadline = time.time() + 15
-        while len(sent_to_signal) < before + 2 and time.time() < deadline:
+        while len(sent_to_signal) < before + 4 and time.time() < deadline:
             time.sleep(0.2)
     finally:
         de_relay.terminate()
@@ -364,6 +398,20 @@ def main() -> int:
     check("BOT_LANGUAGE=de -> German announcements",
           any("🎬 **Neuer Film:** Deutsch Test (2001)" in m and "Qualität: WEBDL-1080p" in m for m in german)
           and any("**Neue Folge:** Deutsch Serie – Staffel 3" in m for m in german))
+    check("BOT_LANGUAGE=de + Radarr German -> German title and plot from Radarr's API",
+          any("**Neuer Film:** Übersetzter Film (2015)" in m and "*Eine deutsche Beschreibung.*" in m
+              for m in german))
+    check("no translation available (404) -> webhook text is used",
+          any("Webhook Only" in m and "*Fallback text.*" in m for m in german))
+
+    # DISPLAY_MOVIE_PLOT=false -> no plot under the movie (format checked in a separate interpreter)
+    code = ("import relay; m = relay.PendingMovie(title='T', year='2001', overview='Plot text', quality='', "
+            "poster=None, source='Radarr'); print(relay.Relay._format_movie(m))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=15,
+                         cwd=os.path.dirname(RELAY),
+                         env=dict(env, RELAY_TOKEN=TOKEN, DISPLAY_MOVIE_PLOT="false", PYTHONIOENCODING="utf-8"))
+    check("DISPLAY_MOVIE_PLOT=false -> no plot under the movie",
+          out.returncode == 0 and "T (2001)" in out.stdout and "Plot text" not in out.stdout)
 
     print(f"\n{len(sent_to_signal)} messages sent to fake Signal, {len(failures)} failed checks")
     server.shutdown()

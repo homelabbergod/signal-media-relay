@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import queue
+import signal
 import re
 import socket
 import struct
@@ -147,6 +148,7 @@ RADARR_LOOKUP = {
     "expire movie": [{"title": "Expire Movie", "year": 2023, "tmdbId": 8016}],
     "many movie": [{"title": "Many Movie", "year": 2022, "tmdbId": 8017}],
     "split movie": [{"title": "Split Movie", "year": 2020, "tmdbId": 8018}],
+    "restart movie": [{"title": "Restart Movie", "year": 2019, "tmdbId": 8019}],
     "future movie": [{"title": "Future Movie", "year": 2099, "tmdbId": 8011, "status": "announced",
                       "digitalRelease": "2099-05-01T00:00:00Z"}],
     # German release names: only the umlaut spelling finds the movie, under its original title
@@ -739,8 +741,9 @@ def main() -> int:
 
     # ------- second run: separate request group (REQUEST_GROUP) + short list lifetime -------
     ws_connected.clear()
+    graceful = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {}
     relay = subprocess.Popen([sys.executable, RELAY], env=dict(env, SELECTION_TTL_SECONDS="4", REQUEST_GROUP=GROUP2),
-                             stdout=log_file, stderr=log_file)
+                             stdout=log_file, stderr=log_file, **graceful)
     try:
         check("relay (request group, short list lifetime) connects", ws_connected.wait(15))
         mia = dict(sender=MEMBER12, name="Mia", group=GROUP2_INTERNAL)
@@ -773,6 +776,18 @@ def main() -> int:
               and not any("Expire.Movie" in b["guid"] for _, b in grabs))
         say("!grab 1", **mia)
         check("!grab after expiry -> no open list", expect_reply("no open release list") is not None)
+
+        # container stops (update/restart) while a list is open -> the unpicked title is cleaned up
+        say("!request Restart Movie", **mia)
+        expect_reply("Releases for 🎬 Restart Movie")
+        restart_id = next((k for k, v in library.items() if v.get("tmdbId") == 8019), 0)
+        relay.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM)
+        relay.wait(15)
+        r = expect_reply("The bot is restarting", timeout=5)
+        check("stop with an open list -> title removed again, requester told",
+              r and "Restart Movie" in r["message"] and "was removed from Radarr again" in r["message"]
+              and r["recipients"] == [GROUP2] and restart_id not in library
+              and any(d.endswith(f"/movie/{restart_id}?deleteFiles=false&addImportExclusion=false") for d in deletes))
     finally:
         chat_in.put(None)
         relay.terminate()
